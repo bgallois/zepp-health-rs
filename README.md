@@ -7,6 +7,33 @@ The Zepp Cloud endpoints used here are unofficial and reverse-engineered. The
 project preserves raw responses and marks inferred field meanings explicitly.
 It does not implement Zepp login or token refresh.
 
+## Development and AI-use disclaimer
+
+This project was developed collaboratively with AI assistance. The project
+owner defined the product direction, milestone and API requirements, and
+directed the implementation. AI proposed implementation approaches, wrote and
+revised Rust code, tests, and documentation, and helped troubleshoot MCP
+behavior. The project owner reviewed the changes and the AI tested the observed
+Zepp endpoints together, including their cache and date-range behavior.
+
+The project owner supplied credentials and configuration choices, account data
+and observed payloads, and final acceptance decisions. AI-assisted changes are
+not presented as independent authorship or as proof that undocumented Zepp
+behavior is universally valid.
+
+AI assistance is not an authority for the Zepp protocol or for health
+interpretation. The following are project evidence rather than AI-generated
+facts:
+
+- API behavior covered by checked-in fixtures and passing tests;
+- values returned by the user's Zepp account and stored in the local cache;
+- the documented cache/provider synchronization behavior;
+- conclusions explicitly labelled as observed, inferred, or unknown.
+
+The Zepp Cloud health endpoints are unofficial and may vary by account,
+device, region, date range, or server revision. A successful test verifies only
+the tested payload and path; it does not prove universal compatibility.
+
 ## What it provides
 
 - Zepp API access with regional host support.

@@ -1,6 +1,6 @@
 //! Provider-independent health queries over the local store.
 
-use std::{future::Future, pin::Pin};
+use std::{collections::BTreeMap, future::Future, pin::Pin};
 
 use serde_json::json;
 use thiserror::Error;
@@ -339,6 +339,36 @@ pub enum HealthError {
     InvalidCachedValue(String),
 }
 
+fn next_date(date: &str) -> Result<String, HealthError> {
+    let bytes = date.as_bytes();
+    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+        return Err(HealthError::InvalidRange);
+    }
+    let year: i32 = date[0..4].parse().map_err(|_| HealthError::InvalidRange)?;
+    let month: u32 = date[5..7].parse().map_err(|_| HealthError::InvalidRange)?;
+    let day: u32 = date[8..10].parse().map_err(|_| HealthError::InvalidRange)?;
+    if !(1..=12).contains(&month) || day == 0 || day > days_in_month(year, month) {
+        return Err(HealthError::InvalidRange);
+    }
+    let (year, month, day) = if day < days_in_month(year, month) {
+        (year, month, day + 1)
+    } else if month < 12 {
+        (year, month + 1, 1)
+    } else {
+        (year + 1, 1, 1)
+    };
+    Ok(format!("{year:04}-{month:02}-{day:02}"))
+}
+
+fn days_in_month(year: i32, month: u32) -> u32 {
+    match month {
+        2 if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    }
+}
+
 pub trait HrvSource: Send + Sync {
     fn fetch_hrv<'a>(
         &'a self,
@@ -544,11 +574,26 @@ impl<S: BandSource> HealthClient<S> {
         if mode == CacheMode::CacheOnly {
             return Err(HealthError::CacheMiss);
         }
-        let fetched = self.source.fetch_band(from_date, to_date).await?;
+        if from_date > to_date {
+            return Err(HealthError::InvalidRange);
+        }
+        let mut fetched = Vec::new();
+        let mut date = from_date.to_owned();
+        loop {
+            fetched.extend(self.source.fetch_band(&date, &date).await?);
+            if date == to_date {
+                break;
+            }
+            date = next_date(&date)?;
+        }
         for (index, record) in fetched.iter().enumerate() {
+            // Zepp can reuse a record UUID when the endpoint is queried one
+            // day at a time. Include the date so daily responses cannot
+            // overwrite one another in the cache.
             let record_key = record
                 .uuid
-                .clone()
+                .as_ref()
+                .map(|uuid| format!("{uuid}:{}", record.date_time))
                 .unwrap_or_else(|| format!("{}-{index}", record.date_time));
             self.store.put_raw_record(&crate::store::RawRecord {
                 metric: METRIC.to_owned(),
@@ -572,14 +617,20 @@ impl<S: BandSource> HealthClient<S> {
     }
 
     fn read_band_data(&self, coverage: TimeRange) -> Result<Vec<DailyHealthRecord>, HealthError> {
-        self.store
+        let records = self
+            .store
             .raw_records("band_data", coverage.from_ms, coverage.to_ms)?
             .into_iter()
             .map(|record| {
                 let band: BandDataRecord = serde_json::from_value(record.payload)?;
                 decode_daily_health(&band)
             })
-            .collect()
+            .collect::<Result<Vec<_>, HealthError>>()?;
+        let mut by_date = BTreeMap::new();
+        for record in records {
+            by_date.insert(record.date.clone(), record);
+        }
+        Ok(by_date.into_values().collect())
     }
 }
 

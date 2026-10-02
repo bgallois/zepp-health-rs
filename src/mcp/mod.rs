@@ -99,9 +99,12 @@ where
         }
         if matches!(
             metric,
-            "heart_rate_detail" | "sleep" | "activity" | "steps" | "calories"
+            "heart_rate_detail" | "activity" | "steps" | "calories"
         ) {
             return Ok(serde_json::to_value(self.get_band_data(args).await?)?);
+        }
+        if metric == "sleep" {
+            return Ok(serde_json::to_value(self.get_sleep(args).await?)?);
         }
         if matches!(metric, "sport_load" | "vo2_max") {
             let mut sport_args = args.clone();
@@ -162,9 +165,10 @@ where
                 object.insert("sub_type".into(), Value::String("watch_score".into()));
                 Ok(serde_json::to_value(self.get_events(&forwarded).await?)?)
             }
-            "sleep_score" | "sleep" | "daily_steps" | "daily_calories" | "daily_summary" => {
+            "sleep_score" | "daily_steps" | "daily_calories" | "daily_summary" => {
                 Ok(serde_json::to_value(self.get_band_data(&forwarded).await?)?)
             }
+            "sleep" => Ok(serde_json::to_value(self.get_sleep(&forwarded).await?)?),
             "sport_load" | "vo2_max" => {
                 let statistic_metric = if metric == "sport_load" {
                     "SPORT_LOAD"
@@ -209,6 +213,15 @@ where
             .health
             .band_data(from_date, to_date, range, mode, now_ms, refresh)
             .await?)
+    }
+
+    async fn get_sleep(&self, args: &Value) -> Result<Vec<Value>, McpError> {
+        Ok(self
+            .get_band_data(args)
+            .await?
+            .into_iter()
+            .map(|record| json!({"date": record.date, "sleep": record.sleep}))
+            .collect())
     }
 
     async fn get_sport_statistics(
