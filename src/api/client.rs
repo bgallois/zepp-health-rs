@@ -103,6 +103,33 @@ impl ZeppApiClient {
         Self::new(host, token, user_id)
     }
 
+    /// Construct a client for MCP startup when credentials will be supplied
+    /// later. Requests made with this client will be rejected by Zepp until a
+    /// real `ZEPP_TOKEN` is configured; this exists so an MCP client can finish
+    /// its protocol handshake and report the configuration problem as a tool
+    /// error instead of seeing the server process exit.
+    pub fn unconfigured_from_env() -> Result<Self, ApiError> {
+        let host = std::env::var("ZEPP_HOST")
+            .or_else(|_| std::env::var("ZEPP_BASE_URL"))
+            .unwrap_or_else(|_| "https://api-mifit-us2.zepp.com".to_owned());
+        let user_id = std::env::var("ZEPP_USER_ID").unwrap_or_default();
+        let supplied_host = host.clone();
+        let host = if supplied_host.starts_with("https://") || supplied_host.starts_with("http://")
+        {
+            supplied_host
+        } else if !supplied_host.is_empty() {
+            format!("https://{supplied_host}")
+        } else {
+            return Err(ApiError::InvalidHost);
+        };
+        Ok(Self {
+            http: reqwest::Client::new(),
+            host: host.trim_end_matches('/').to_owned(),
+            token: String::new(),
+            user_id,
+        })
+    }
+
     /// Retrieve Zepp's detailed daily health records for a date range.
     ///
     /// The returned records preserve Zepp's base64 fields. Call
