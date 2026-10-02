@@ -38,13 +38,13 @@ pub enum CacheMode {
     Refresh,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct HrvPoint {
     pub timestamp_ms: i64,
     pub rmssd_ms: f64,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct DailyHealthRecord {
     pub date: String,
     pub heart_rate_bpm: Vec<Option<u8>>,
@@ -60,7 +60,7 @@ pub struct DailyHealthRecord {
     pub record_id: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct ActivitySegment {
     pub start_minute: u32,
     pub end_minute: u32,
@@ -68,7 +68,7 @@ pub struct ActivitySegment {
     pub steps: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct SleepRecord {
     pub start_s: Option<i64>,
     pub end_s: Option<i64>,
@@ -77,7 +77,7 @@ pub struct SleepRecord {
     pub stages: Vec<SleepStage>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct SleepStage {
     pub start_minute: u32,
     pub end_minute: u32,
@@ -128,6 +128,34 @@ pub trait BandSource: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<Vec<BandDataRecord>, ApiError>> + Send + 'a>>;
 }
 
+pub trait SportSource: Send + Sync {
+    fn fetch_sport_statistics<'a>(
+        &'a self,
+        metric: &'a str,
+        from_date: &'a str,
+        to_date: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<SportStatisticRecord>, ApiError>> + Send + 'a>>;
+}
+
+impl SportSource for ZeppApiClient {
+    fn fetch_sport_statistics<'a>(
+        &'a self,
+        metric: &'a str,
+        from_date: &'a str,
+        to_date: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<SportStatisticRecord>, ApiError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            Ok(self
+                .fetch_sport_statistics(metric, from_date, to_date, Some(200), false)
+                .await?
+                .iter()
+                .map(expose_sport_statistic)
+                .collect())
+        })
+    }
+}
+
 impl BandSource for ZeppApiClient {
     fn fetch_band<'a>(
         &'a self,
@@ -163,7 +191,7 @@ impl EventSource for ZeppApiClient {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct SportStatisticRecord {
     pub fields: serde_json::Map<String, serde_json::Value>,
 }
@@ -551,6 +579,71 @@ impl<S: BandSource> HealthClient<S> {
                 let band: BandDataRecord = serde_json::from_value(record.payload)?;
                 decode_daily_health(&band)
             })
+            .collect()
+    }
+}
+
+impl<S: SportSource> HealthClient<S> {
+    #[allow(clippy::too_many_arguments)]
+    pub async fn sport_statistics(
+        &self,
+        metric_name: &str,
+        from_date: &str,
+        to_date: &str,
+        coverage: TimeRange,
+        mode: CacheMode,
+        now_ms: i64,
+        recent_refresh_ms: Option<i64>,
+    ) -> Result<Vec<SportStatisticRecord>, HealthError> {
+        let metric = format!("sport:{metric_name}");
+        let covered = self.store.coverage_covers(
+            &metric,
+            coverage.from_ms,
+            coverage.to_ms,
+            now_ms,
+            recent_refresh_ms,
+        )?;
+        if covered && mode != CacheMode::Refresh {
+            return self.read_sport_statistics(&metric, coverage);
+        }
+        if mode == CacheMode::CacheOnly {
+            return Err(HealthError::CacheMiss);
+        }
+        let fetched = self
+            .source
+            .fetch_sport_statistics(metric_name, from_date, to_date)
+            .await?;
+        for (index, statistic) in fetched.iter().enumerate() {
+            self.store.put_raw_record(&crate::store::RawRecord {
+                metric: metric.clone(),
+                record_key: format!("{now_ms}-{index}"),
+                observed_at_ms: None,
+                source_endpoint: format!("zepp/sport/{metric_name}"),
+                source_device: None,
+                source_timezone: None,
+                payload: serde_json::to_value(statistic)?,
+                fetched_at_ms: now_ms,
+            })?;
+        }
+        self.store.mark_coverage(&CoverageRange {
+            metric: metric.clone(),
+            from_ms: coverage.from_ms,
+            to_ms: coverage.to_ms,
+            source_endpoint: format!("zepp/sport/{metric_name}"),
+            synced_at_ms: now_ms,
+        })?;
+        self.read_sport_statistics(&metric, coverage)
+    }
+
+    fn read_sport_statistics(
+        &self,
+        metric: &str,
+        coverage: TimeRange,
+    ) -> Result<Vec<SportStatisticRecord>, HealthError> {
+        self.store
+            .raw_records(metric, coverage.from_ms, coverage.to_ms)?
+            .into_iter()
+            .map(|record| Ok(serde_json::from_value(record.payload)?))
             .collect()
     }
 }
