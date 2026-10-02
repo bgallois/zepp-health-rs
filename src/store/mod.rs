@@ -7,5 +7,7 @@
 mod sqlite;
 mod sync;
 
-pub use sqlite::{CoverageRange, RawRecord, SampleRecord, Store, StoreError};
+pub use sqlite::{
+    CoverageRange, RawRecord, SampleRecord, Store, StoreError, StoredRawRecord, StoredSample,
+};
 pub use sync::{SyncDecision, SyncPolicy};

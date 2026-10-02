@@ -4,4 +4,5 @@
 //! cloud API is unofficial; raw Zepp response types stay in the `api` module.
 
 pub mod api;
+pub mod health;
 pub mod store;

@@ -73,6 +73,24 @@ pub struct SampleRecord {
 }
 
 #[derive(Debug, Clone)]
+pub struct StoredSample {
+    pub timestamp_ms: i64,
+    pub source_record_key: Option<String>,
+    pub value: Value,
+}
+
+#[derive(Debug, Clone)]
+pub struct StoredRawRecord {
+    pub record_key: String,
+    pub observed_at_ms: Option<i64>,
+    pub source_endpoint: String,
+    pub source_device: Option<String>,
+    pub source_timezone: Option<String>,
+    pub payload: Value,
+    pub fetched_at_ms: i64,
+}
+
+#[derive(Debug, Clone)]
 pub struct CoverageRange {
     pub metric: String,
     pub from_ms: i64,
@@ -156,6 +174,42 @@ impl Store {
         Ok(())
     }
 
+    pub fn raw_records(
+        &self,
+        metric: &str,
+        from_ms: i64,
+        to_ms: i64,
+    ) -> Result<Vec<StoredRawRecord>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT record_key, observed_at_ms, source_endpoint, source_device,
+                    source_timezone, payload_json, fetched_at_ms
+             FROM raw_records
+             WHERE metric=?1 AND (observed_at_ms IS NULL OR
+                    (observed_at_ms>=?2 AND observed_at_ms<=?3))
+             ORDER BY observed_at_ms, record_key",
+        )?;
+        let rows = statement.query_map(params![metric, from_ms, to_ms], |row| {
+            let payload_json: String = row.get(5)?;
+            let payload = serde_json::from_str(&payload_json).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    5,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?;
+            Ok(StoredRawRecord {
+                record_key: row.get(0)?,
+                observed_at_ms: row.get(1)?,
+                source_endpoint: row.get(2)?,
+                source_device: row.get(3)?,
+                source_timezone: row.get(4)?,
+                payload,
+                fetched_at_ms: row.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     pub fn mark_coverage(&self, range: &CoverageRange) -> Result<(), StoreError> {
         if range.from_ms > range.to_ms {
             return Err(StoreError::InvalidCoverageRange);
@@ -211,6 +265,35 @@ impl Store {
             [metric],
             |row| row.get(0),
         )?)
+    }
+
+    pub fn samples(
+        &self,
+        metric: &str,
+        from_ms: i64,
+        to_ms: i64,
+    ) -> Result<Vec<StoredSample>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT timestamp_ms, source_record_key, value_json
+             FROM samples WHERE metric=?1 AND timestamp_ms>=?2 AND timestamp_ms<=?3
+             ORDER BY timestamp_ms",
+        )?;
+        let rows = statement.query_map(params![metric, from_ms, to_ms], |row| {
+            let value_json: String = row.get(2)?;
+            let value = serde_json::from_str(&value_json).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    2,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?;
+            Ok(StoredSample {
+                timestamp_ms: row.get(0)?,
+                source_record_key: row.get(1)?,
+                value,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
     pub fn count_raw_records(&self, metric: &str) -> Result<i64, StoreError> {
