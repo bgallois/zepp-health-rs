@@ -64,7 +64,7 @@ where
             .ok_or_else(|| McpError::InvalidRequest("tools/call requires a tool name".into()))?;
         let args = params.get("arguments").unwrap_or(&Value::Null);
         let result = match name {
-            "get_hrv" => serde_json::to_value(self.get_hrv(args).await?)?,
+            "get_timeseries" => serde_json::to_value(self.get_timeseries(args).await?)?,
             "get_events" => serde_json::to_value(self.get_events(args).await?)?,
             "get_band_data" => serde_json::to_value(self.get_band_data(args).await?)?,
             "get_sport_statistics" => serde_json::to_value(self.get_sport_statistics(args).await?)?,
@@ -82,6 +82,64 @@ where
     async fn get_hrv(&self, args: &Value) -> Result<Vec<HrvPoint>, McpError> {
         let (range, mode, now_ms, refresh) = query_args(args)?;
         Ok(self.health.hrv(range, mode, now_ms, refresh).await?)
+    }
+
+    async fn get_timeseries(&self, args: &Value) -> Result<Value, McpError> {
+        let metric = args
+            .get("metric")
+            .and_then(Value::as_str)
+            .ok_or_else(|| McpError::InvalidRequest("get_timeseries requires metric".into()))?;
+        if metric == "hrv" || metric == "hrv_rmssd" {
+            return Ok(serde_json::to_value(self.get_hrv(args).await?)?);
+        }
+        if matches!(
+            metric,
+            "heart_rate" | "sleep" | "activity" | "steps" | "calories"
+        ) {
+            return Ok(serde_json::to_value(self.get_band_data(args).await?)?);
+        }
+        if matches!(metric, "sport_load" | "vo2_max") {
+            let mut sport_args = args.clone();
+            sport_args
+                .as_object_mut()
+                .expect("timeseries arguments must be an object")
+                .insert(
+                    "metric".into(),
+                    Value::String(if metric == "sport_load" {
+                        "SPORT_LOAD".into()
+                    } else {
+                        "VO2_MAX".into()
+                    }),
+                );
+            return Ok(serde_json::to_value(
+                self.get_sport_statistics(&sport_args).await?,
+            )?);
+        }
+        let (event_type, default_subtype) = match metric {
+            "readiness" => ("readiness", Some("watch_score")),
+            "respiratory_rate" => ("RespiratoryRate", Some("real_data")),
+            "charge" => ("Charge", Some("real_data")),
+            "spo2" => ("blood_oxygen", Some("click")),
+            "exertion" | "training_load" => ("exertion", Some("algo_result")),
+            "daily_health" => ("DailyHealth", Some("summary")),
+            "stress" => ("all_day_stress", None),
+            _ => {
+                return Err(McpError::InvalidRequest(format!(
+                    "unsupported metric '{metric}'; use get_events for an explicit event selector"
+                )));
+            }
+        };
+        let mut event_args = args.clone();
+        let object = event_args.as_object_mut().ok_or_else(|| {
+            McpError::InvalidRequest("get_timeseries arguments must be an object".into())
+        })?;
+        object.insert("event_type".into(), Value::String(event_type.into()));
+        if !object.contains_key("sub_type")
+            && let Some(subtype) = default_subtype
+        {
+            object.insert("sub_type".into(), Value::String(subtype.into()));
+        }
+        Ok(serde_json::to_value(self.get_events(&event_args).await?)?)
     }
 
     async fn get_events(&self, args: &Value) -> Result<Vec<EventRecord>, McpError> {
@@ -176,7 +234,13 @@ fn tools() -> Value {
     event_properties.insert("event_type".into(), json!({"type":"string"}));
     event_properties.insert("sub_type".into(), json!({"type":"string"}));
     json!([
-        {"name":"get_hrv","description":"Get HRV/RMSSD samples for a time range.","inputSchema":{"type":"object","required":["start_ms","end_ms"],"properties":query_properties()}},
+        {"name":"get_timeseries","description":"Get a health time series for a selected metric. Use metric=hrv, readiness, respiratory_rate, charge, spo2, exertion, daily_health, or stress.","inputSchema":{"type":"object","required":["metric","start_ms","end_ms"],"properties":{
+            "metric":{"type":"string","description":"hrv, heart_rate, sleep, activity, steps, calories, readiness, respiratory_rate, charge, spo2, exertion, daily_health, stress, sport_load, or vo2_max"},
+            "start_ms":{"type":"integer"},"end_ms":{"type":"integer"},
+            "from_date":{"type":"string","description":"Required for daily band or sport metrics (YYYY-MM-DD)"},"to_date":{"type":"string","description":"Required for daily band or sport metrics (YYYY-MM-DD)"},
+            "cache_mode":{"type":"string","enum":["cache_only","cache_first","refresh"]},
+            "now_ms":{"type":"integer"},"recent_refresh_ms":{"type":"integer"}
+        }}},
         {"name":"get_events","description":"Get a structured Zepp event stream for a time range. Use this for readiness, Charge, PAI, SpO2, exertion, DailyHealth, respiratory rate, stress, and other event selectors.","inputSchema":{"type":"object","required":["event_type","start_ms","end_ms"],"properties":event_properties}},
         {"name":"get_band_data","description":"Get detailed daily band records including minute heart rate, sleep, steps, calories, distance, activity segments, and preserved raw activity data.","inputSchema":{"type":"object","required":["from_date","to_date","start_ms","end_ms"],"properties":{
             "from_date":{"type":"string","description":"Inclusive YYYY-MM-DD date"},

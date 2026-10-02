@@ -14,7 +14,8 @@ It does not implement Zepp login or token refresh.
 - Cache policies: `CacheOnly`, `CacheFirst`, and `Refresh`.
 - Stable health representations for HRV, heart rate, sleep, activity,
   readiness, respiratory rate, event streams, and sport statistics.
-- A local stdio MCP server with structured HRV, event, band-data, and sport-statistics tools.
+- A local stdio MCP server with a common `get_timeseries` interface plus raw
+  event, band-data, and sport-statistics tools.
 
 The MCP event tool can retrieve observed streams such as readiness, Charge,
 PAI, SpO₂, exertion, DailyHealth, respiratory rate, and stress. The raw event
@@ -116,7 +117,10 @@ cargo run --release -- mcp
 The process reads MCP requests from stdin and writes responses to stdout. It
 must be kept running by the MCP client. It advertises:
 
-- `get_hrv`: HRV/RMSSD samples for `start_ms` through `end_ms`.
+- `get_timeseries`: time-series data selected by `metric`, including `hrv`,
+  `heart_rate`, `sleep`, `activity`, `steps`, `calories`, `readiness`,
+  `respiratory_rate`, `charge`, `spo2`, `exertion`, `daily_health`, `stress`,
+  `sport_load`, and `vo2_max`.
 - `get_events`: a structured event stream selected by `event_type` and
   optional `sub_type`.
 - `get_band_data`: detailed daily records with minute heart rate, sleep,
@@ -124,7 +128,7 @@ must be kept running by the MCP client. It advertises:
 - `get_sport_statistics`: sport-load or VO₂-max statistic records, when the
   account exposes them.
 
-The HRV and event tools accept:
+The time-series and event tools accept:
 
 ```json
 {
@@ -134,6 +138,8 @@ The HRV and event tools accept:
   "recent_refresh_ms": 86400000
 }
 ```
+
+Daily band and sport metrics additionally require `from_date` and `to_date`.
 
 `get_events` additionally requires `event_type`, for example:
 
