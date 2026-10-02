@@ -1,0 +1,15 @@
+{
+  "code": 1,
+  "message": "success",
+  "data": [{
+    "uid": "fixture-user",
+    "data_type": 0,
+    "date_time": "2026-02-06",
+    "source": 10289411,
+    "summary": "eyJzdHAiOnsidHRsIjoxMjM0LCJkaXMiOjU2NywiY2FsIjo4OSwic3RhZ2UiOlt7InN0YXJ0Ijo2MCwic3RvcCI6NjUsIm1vZGUiOjMsInN0ZXAiOjEyfV19LCJzbHAiOnsic3QiOjE3MDAwMDAwMDAsImVkIjoxNzAwMDIwMDAwLCJyaHIiOjU0LCJzcyI6ODIsInN0YWdlIjpbeyJzdGFydCI6MTM4MCwic3RvcCI6MTQ0NSwibW9kZSI6NX0seyJzdGFydCI6MTQ0NSwic3RvcCI6MTUwMCwibW9kZSI6OH1dfSwidHoiOiIrMzYwMCJ9",
+    "data_hr": "/wA9gP7/AAA=",
+    "data": "AAECAwQF",
+    "device_id": "fixture-device",
+    "uuid": "fixture-record"
+  }]
+}
