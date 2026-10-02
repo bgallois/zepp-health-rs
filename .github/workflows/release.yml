@@ -1,0 +1,72 @@
+name: Build and release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing version tag to publish (for example, v0.1.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  linux-musl:
+    name: Linux x86_64 (static musl)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install musl toolchain
+        run: sudo apt-get update && sudo apt-get install --yes musl-tools
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Build static release binary
+        run: cargo build --locked --release --target x86_64-unknown-linux-musl
+
+      - name: Package binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="target/x86_64-unknown-linux-musl/release/zepp-health-rs"
+          test -f "$binary"
+          strip "$binary"
+          install -D -m 0755 "$binary" "dist/zepp-health-rs-x86_64-unknown-linux-musl"
+          sha256sum "dist/zepp-health-rs-x86_64-unknown-linux-musl" > "dist/zepp-health-rs-x86_64-unknown-linux-musl.sha256"
+
+      - name: Verify static binary
+        run: |
+          file dist/zepp-health-rs-x86_64-unknown-linux-musl
+          ldd_output="$(ldd dist/zepp-health-rs-x86_64-unknown-linux-musl 2>&1 || true)"
+          printf '%s\n' "$ldd_output"
+          printf '%s\n' "$ldd_output" | grep -Eq 'statically linked|not a dynamic executable'
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ inputs.tag || github.ref_name }}"
+          [[ "$tag" == v* ]]
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" \
+              dist/zepp-health-rs-x86_64-unknown-linux-musl \
+              dist/zepp-health-rs-x86_64-unknown-linux-musl.sha256 \
+              --clobber
+          else
+            gh release create "$tag" \
+              dist/zepp-health-rs-x86_64-unknown-linux-musl \
+              dist/zepp-health-rs-x86_64-unknown-linux-musl.sha256 \
+              --generate-notes \
+              --title "$tag"
+          fi

@@ -275,3 +275,27 @@ This project handles sensitive personal health data. Recommended practices:
 - Use a dedicated local account or secret manager for the token.
 - Do not commit `zepp-health.sqlite3`, tokens, cookies, or raw personal data.
 - Review MCP tool calls before granting an AI agent access to the database.
+
+## Static builds and GitHub releases
+
+The repository includes a GitHub Actions release workflow. It builds a
+statically linked Linux x86_64 binary against musl and publishes it with a
+SHA-256 checksum.
+
+To publish a release, push a version tag:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The workflow also supports a manual run from the Actions tab. Releases are
+created only for tags matching `v*`; no credentials or health data are included
+in the artifacts.
+
+For a local static build:
+
+```bash
+rustup target add x86_64-unknown-linux-musl
+cargo build --locked --release --target x86_64-unknown-linux-musl
+```
