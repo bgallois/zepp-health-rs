@@ -140,6 +140,7 @@ impl ZeppApiClient {
         &self,
         request: BandDataRequest<'_>,
     ) -> Result<Vec<BandDataRecord>, ApiError> {
+        self.ensure_token()?;
         let mut headers = HeaderMap::new();
         headers.insert(
             "apptoken",
@@ -309,6 +310,7 @@ impl ZeppApiClient {
     }
 
     fn request(&self, path: &str) -> Result<reqwest::RequestBuilder, ApiError> {
+        self.ensure_token()?;
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(
             "apptoken",
@@ -320,5 +322,13 @@ impl ZeppApiClient {
             .http
             .get(format!("{}{}", self.host, path))
             .headers(headers))
+    }
+
+    fn ensure_token(&self) -> Result<(), ApiError> {
+        if self.token.is_empty() {
+            Err(ApiError::MissingToken)
+        } else {
+            Ok(())
+        }
     }
 }

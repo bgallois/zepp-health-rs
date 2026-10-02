@@ -44,11 +44,15 @@ where
             "initialize" => json!({
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {"listChanged": false}},
-                "serverInfo": {"name": "zepp-health-rs", "version": env!("CARGO_PKG_VERSION")}
+                "serverInfo": {"name": "zepp-health-rs", "version": env!("CARGO_PKG_VERSION")},
+                "instructions": "Use get_summary first for named health metrics such as resting heart rate, sleep HRV, HRV score, sleep score, daily steps, daily calories, sport load, and VO2 max. Use get_timeseries only when the user asks for detailed samples, a custom aggregation, or analysis that cannot be answered by a provider summary. Do not derive a named summary from raw samples when Zepp provides an authoritative processed value."
             }),
             "notifications/initialized" => return Ok(None),
             "tools/list" => json!({"tools": tools()}),
-            "tools/call" => self.call_tool(request.get("params")).await?,
+            "tools/call" => match self.call_tool(request.get("params")).await {
+                Ok(result) => result,
+                Err(error) => tool_error(error.to_string()),
+            },
             _ => return Ok(id.map(|id| error_response(id, -32601, "method not found"))),
         };
         Ok(id.map(|id| json!({"jsonrpc":"2.0", "id":id, "result":result})))
@@ -65,6 +69,7 @@ where
         let args = params.get("arguments").unwrap_or(&Value::Null);
         let result = match name {
             "get_timeseries" => serde_json::to_value(self.get_timeseries(args).await?)?,
+            "get_summary" => self.get_summary(args).await?,
             "get_events" => serde_json::to_value(self.get_events(args).await?)?,
             "get_band_data" => serde_json::to_value(self.get_band_data(args).await?)?,
             "get_sport_statistics" => serde_json::to_value(self.get_sport_statistics(args).await?)?,
@@ -94,7 +99,7 @@ where
         }
         if matches!(
             metric,
-            "heart_rate" | "sleep" | "activity" | "steps" | "calories"
+            "heart_rate_detail" | "sleep" | "activity" | "steps" | "calories"
         ) {
             return Ok(serde_json::to_value(self.get_band_data(args).await?)?);
         }
@@ -116,7 +121,7 @@ where
             )?);
         }
         let (event_type, default_subtype) = match metric {
-            "readiness" => ("readiness", Some("watch_score")),
+            "readiness" | "resting_heart_rate" => ("readiness", Some("watch_score")),
             "respiratory_rate" => ("RespiratoryRate", Some("real_data")),
             "charge" => ("Charge", Some("real_data")),
             "spo2" => ("blood_oxygen", Some("click")),
@@ -140,6 +145,41 @@ where
             object.insert("sub_type".into(), Value::String(subtype.into()));
         }
         Ok(serde_json::to_value(self.get_events(&event_args).await?)?)
+    }
+
+    async fn get_summary(&self, args: &Value) -> Result<Value, McpError> {
+        let metric = args
+            .get("metric")
+            .and_then(Value::as_str)
+            .ok_or_else(|| McpError::InvalidRequest("get_summary requires metric".into()))?;
+        let mut forwarded = args.clone();
+        let object = forwarded.as_object_mut().ok_or_else(|| {
+            McpError::InvalidRequest("get_summary arguments must be an object".into())
+        })?;
+        match metric {
+            "resting_heart_rate" | "sleep_hrv" | "hrv_score" | "skin_temperature" => {
+                object.insert("event_type".into(), Value::String("readiness".into()));
+                object.insert("sub_type".into(), Value::String("watch_score".into()));
+                Ok(serde_json::to_value(self.get_events(&forwarded).await?)?)
+            }
+            "sleep_score" | "sleep" | "daily_steps" | "daily_calories" | "daily_summary" => {
+                Ok(serde_json::to_value(self.get_band_data(&forwarded).await?)?)
+            }
+            "sport_load" | "vo2_max" => {
+                let statistic_metric = if metric == "sport_load" {
+                    "SPORT_LOAD"
+                } else {
+                    "VO2_MAX"
+                };
+                object.insert("metric".into(), Value::String(statistic_metric.into()));
+                Ok(serde_json::to_value(
+                    self.get_sport_statistics(&forwarded).await?,
+                )?)
+            }
+            _ => Err(McpError::InvalidRequest(format!(
+                "unsupported summary metric '{metric}'"
+            ))),
+        }
     }
 
     async fn get_events(&self, args: &Value) -> Result<Vec<EventRecord>, McpError> {
@@ -235,9 +275,15 @@ fn tools() -> Value {
     event_properties.insert("sub_type".into(), json!({"type":"string"}));
     json!([
         {"name":"get_timeseries","description":"Get a health time series for a selected metric. Use metric=hrv, readiness, respiratory_rate, charge, spo2, exertion, daily_health, or stress.","inputSchema":{"type":"object","required":["metric","start_ms","end_ms"],"properties":{
-            "metric":{"type":"string","description":"hrv, heart_rate, sleep, activity, steps, calories, readiness, respiratory_rate, charge, spo2, exertion, daily_health, stress, sport_load, or vo2_max"},
+            "metric":{"type":"string","description":"hrv, resting_heart_rate, heart_rate_detail (intraday samples), sleep, activity, steps, calories, readiness, respiratory_rate, charge, spo2, exertion, daily_health, stress, sport_load, or vo2_max"},
             "start_ms":{"type":"integer"},"end_ms":{"type":"integer"},
             "from_date":{"type":"string","description":"Required for daily band or sport metrics (YYYY-MM-DD)"},"to_date":{"type":"string","description":"Required for daily band or sport metrics (YYYY-MM-DD)"},
+            "cache_mode":{"type":"string","enum":["cache_only","cache_first","refresh"]},
+            "now_ms":{"type":"integer"},"recent_refresh_ms":{"type":"integer"}
+        }}},
+        {"name":"get_summary","description":"Get an authoritative provider summary first. Use this for resting_heart_rate, sleep_hrv, hrv_score, skin_temperature, sleep_score, daily_steps, daily_calories, daily_summary, sport_load, or vo2_max before requesting detailed time-series data.","inputSchema":{"type":"object","required":["metric","start_ms","end_ms"],"properties":{
+            "metric":{"type":"string"},"start_ms":{"type":"integer"},"end_ms":{"type":"integer"},
+            "from_date":{"type":"string"},"to_date":{"type":"string"},
             "cache_mode":{"type":"string","enum":["cache_only","cache_first","refresh"]},
             "now_ms":{"type":"integer"},"recent_refresh_ms":{"type":"integer"}
         }}},
@@ -268,6 +314,13 @@ fn query_properties() -> Value {
 
 fn error_response(id: Value, code: i64, message: &str) -> Value {
     json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message}})
+}
+
+fn tool_error(message: String) -> Value {
+    json!({
+        "isError": true,
+        "content": [{"type": "text", "text": message}]
+    })
 }
 
 fn now_ms() -> i64 {

@@ -15,7 +15,7 @@ It does not implement Zepp login or token refresh.
 - Stable health representations for HRV, heart rate, sleep, activity,
   readiness, respiratory rate, event streams, and sport statistics.
 - A local stdio MCP server with a common `get_timeseries` interface plus raw
-  event, band-data, and sport-statistics tools.
+  event, band-data, sport-statistics, and summary tools.
 
 The MCP event tool can retrieve observed streams such as readiness, Charge,
 PAI, SpO₂, exertion, DailyHealth, respiratory rate, and stress. The raw event
@@ -118,9 +118,12 @@ The process reads MCP requests from stdin and writes responses to stdout. It
 must be kept running by the MCP client. It advertises:
 
 - `get_timeseries`: time-series data selected by `metric`, including `hrv`,
-  `heart_rate`, `sleep`, `activity`, `steps`, `calories`, `readiness`,
+  `resting_heart_rate`, `heart_rate_detail`, `sleep`, `activity`, `steps`, `calories`, `readiness`,
   `respiratory_rate`, `charge`, `spo2`, `exertion`, `daily_health`, `stress`,
   `sport_load`, and `vo2_max`.
+- `get_summary`: authoritative processed summaries such as
+  `resting_heart_rate`, `sleep_hrv`, `hrv_score`, `sleep_score`, daily steps,
+  daily calories, sport load, and VO₂ max.
 - `get_events`: a structured event stream selected by `event_type` and
   optional `sub_type`.
 - `get_band_data`: detailed daily records with minute heart rate, sleep,
@@ -140,6 +143,18 @@ The time-series and event tools accept:
 ```
 
 Daily band and sport metrics additionally require `from_date` and `to_date`.
+
+Agents should use `get_summary` first for named metrics. They should use
+`get_timeseries` only when detailed samples, custom aggregation, or a
+correlation analysis is required. For example, answer “what was my nocturnal
+RHR this week?” from `get_summary(metric="resting_heart_rate")`; use detailed
+heart rate only for questions about intraday patterns.
+
+For named summary metrics, prefer the processed provider stream. For example,
+`metric="resting_heart_rate"` reads the nightly `sleepRHR` value from
+`readiness/watch_score`; it should not be reconstructed by averaging detailed
+heart-rate samples. Use `metric="heart_rate_detail"` only when you want intraday
+heart-rate detail or a custom calculation.
 
 `get_events` additionally requires `event_type`, for example:
 
@@ -181,6 +196,24 @@ The exact settings screen and configuration filename differ between Claude,
 Cursor, VS Code, Codex, and other MCP clients. The important properties are
 the executable, the `mcp` argument, and the private environment variables.
 
+For Codex CLI, add the environment directly to `~/.codex/config.toml` (TOML
+does not expand `$ZEPP_TOKEN` from your interactive shell):
+
+```toml
+[mcp_servers.zepp-health]
+command = "/home/guest/Codes/zepp-health-rs/target/release/zepp-health-rs"
+args = ["mcp"]
+env = {
+  ZEPP_TOKEN = "replace-with-your-token",
+  ZEPP_USER_ID = "replace-with-your-user-id",
+  ZEPP_HOST = "api-mifit-de2.zepp.com",
+  ZEPP_DB_PATH = "/home/guest/Codes/zepp-health-rs/zepp-health.sqlite3"
+}
+```
+
+Keep this file private and restart Codex after changing it. Stdio MCP servers
+run as a separate process and require credentials in that process environment.
+
 ## Example: “Can you correlate my HRV rise with something in my data?”
 
 Ask the agent a question such as:
@@ -191,7 +224,7 @@ Ask the agent a question such as:
 
 The agent should then:
 
-1. Call `get_hrv` for the 14-day period.
+1. Call `get_timeseries` with `metric="hrv"` for the 14-day period.
 2. Call `get_events` for `readiness/watch_score` to obtain nightly HRV,
    sleep RHR, and readiness scores.
 3. Call `get_events` for `exertion/algo_result`, `Charge/real_data`, and
