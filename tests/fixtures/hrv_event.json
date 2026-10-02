@@ -1,0 +1,13 @@
+{
+  "userId": "fixture-user",
+  "eventType": "HRVRMSSD",
+  "subType": "real_data",
+  "timestamp": 1790000000000,
+  "value": {
+    "startTime": 1790000000000,
+    "samples": [
+      {"s": 9000000, "u": 9733832, "hrv": 48},
+      {"s": 9060000, "u": 9733832, "hrv": 56}
+    ]
+  }
+}

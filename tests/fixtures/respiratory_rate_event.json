@@ -1,0 +1,8 @@
+{
+  "eventType": "RespiratoryRate",
+  "subType": "real_data",
+  "timestamp": 1790812800000,
+  "value": {
+    "measurements": "Dg4OAA8="
+  }
+}

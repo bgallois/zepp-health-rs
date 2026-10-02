@@ -8,10 +8,11 @@ mod client;
 mod error;
 mod models;
 
-pub use client::{BandDataRequest, ZeppApiClient};
+pub use client::{BandDataRequest, EventRequest, ZeppApiClient};
 pub use error::ApiError;
 pub use models::{
-    ActivityStage, BandDataRecord, BandSummary, SleepStage, SleepSummary, StepSummary,
+    ActivityStage, BandDataRecord, BandSummary, EventItem, HrvSample, ReadinessSample,
+    RespiratoryRateSample, SleepStage, SleepSummary, SportStatistic, StepSummary,
 };
 
 /// The endpoint currently implemented by this crate.

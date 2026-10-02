@@ -1,0 +1,9 @@
+{
+  "items": [{
+    "dayId": "2026-02-06",
+    "currnetDayTrainLoad": 56,
+    "wtlSum": 379,
+    "wtlSumOptimalMin": 330,
+    "wtlSumOptimalMax": 735
+  }]
+}

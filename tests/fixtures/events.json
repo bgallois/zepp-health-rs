@@ -1,0 +1,10 @@
+{
+  "items": [{
+    "userId": "fixture-user",
+    "eventType": "all_day_stress",
+    "subType": "all_day_stress",
+    "timestamp": 1700000000000,
+    "avgStress": "43",
+    "data": "[{\"time\":1700000000000,\"value\":47}]"
+  }]
+}

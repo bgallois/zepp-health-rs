@@ -5,7 +5,7 @@ use thiserror::Error;
 pub enum ApiError {
     #[error("missing Zepp API token")]
     MissingToken,
-    #[error("Zepp API host must be an absolute http(s) URL")]
+    #[error("Zepp API host must be a hostname or absolute http(s) URL")]
     InvalidHost,
     #[error("Zepp request failed: {0}")]
     Transport(#[from] reqwest::Error),

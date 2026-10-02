@@ -1,0 +1,15 @@
+{
+  "userId": "fixture-user",
+  "eventType": "readiness",
+  "subType": "watch_score",
+  "timestamp": 1790822520000,
+  "value": {
+    "sleepHRV": 49,
+    "hrvScore": 69,
+    "sleepRHR": 48,
+    "skinTempCalibrated": 9,
+    "skinTempScore": 98,
+    "skinTempBaseLine": -3,
+    "deviceSource": 10289411
+  }
+}
