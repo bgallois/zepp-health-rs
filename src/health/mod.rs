@@ -196,6 +196,13 @@ pub struct SportStatisticRecord {
     pub fields: serde_json::Map<String, serde_json::Value>,
 }
 
+/// One weight/body-measurement record. Field names are preserved because the
+/// endpoint schema is observed but not officially documented.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct WeightRecord {
+    pub fields: serde_json::Map<String, serde_json::Value>,
+}
+
 pub fn decode_daily_health(record: &BandDataRecord) -> Result<DailyHealthRecord, HealthError> {
     let summary = record.decode_summary()?;
     let heart_rate_bpm = record.decode_heart_rate()?.unwrap_or_default();
@@ -631,6 +638,104 @@ impl<S: BandSource> HealthClient<S> {
             by_date.insert(record.date.clone(), record);
         }
         Ok(by_date.into_values().collect())
+    }
+}
+
+pub trait WeightSource: Send + Sync {
+    fn fetch_weight<'a>(
+        &'a self,
+        range: TimeRange,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<WeightRecord>, ApiError>> + Send + 'a>>;
+}
+
+impl WeightSource for ZeppApiClient {
+    fn fetch_weight<'a>(
+        &'a self,
+        range: TimeRange,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<WeightRecord>, ApiError>> + Send + 'a>> {
+        Box::pin(async move {
+            let raw = self
+                .fetch_weight_records(range.from_ms, range.to_ms, 300)
+                .await?;
+            let values = raw
+                .as_array()
+                .cloned()
+                .or_else(|| raw.get("items").and_then(|v| v.as_array()).cloned())
+                .or_else(|| raw.get("data").and_then(|v| v.as_array()).cloned())
+                .unwrap_or_default();
+            Ok(values
+                .into_iter()
+                .filter_map(|value| value.as_object().cloned())
+                .map(|fields| WeightRecord { fields })
+                .collect())
+        })
+    }
+}
+
+impl<S: WeightSource> HealthClient<S> {
+    pub async fn weight(
+        &self,
+        range: TimeRange,
+        mode: CacheMode,
+        now_ms: i64,
+        recent_refresh_ms: Option<i64>,
+    ) -> Result<Vec<WeightRecord>, HealthError> {
+        const METRIC: &str = "weight";
+        let covered = self.store.coverage_covers(
+            METRIC,
+            range.from_ms,
+            range.to_ms,
+            now_ms,
+            recent_refresh_ms,
+        )?;
+        if covered && mode != CacheMode::Refresh {
+            // Do not let a previously empty response permanently suppress
+            // retries. This also recovers caches created before the weight
+            // endpoint timestamp-unit fix.
+            let cached = self.read_weight(range)?;
+            if !cached.is_empty() {
+                return Ok(cached);
+            }
+        }
+        if mode == CacheMode::CacheOnly {
+            return Err(HealthError::CacheMiss);
+        }
+        let fetched = self.source.fetch_weight(range).await?;
+        for (index, record) in fetched.iter().enumerate() {
+            let timestamp = record
+                .fields
+                .get("timestamp")
+                .and_then(|v| v.as_i64())
+                .or_else(|| record.fields.get("time").and_then(|v| v.as_i64()));
+            self.store.put_raw_record(&crate::store::RawRecord {
+                metric: METRIC.to_owned(),
+                record_key: format!("{}-{index}", timestamp.unwrap_or(now_ms)),
+                observed_at_ms: timestamp,
+                source_endpoint: "/weightRecords".to_owned(),
+                source_device: None,
+                source_timezone: None,
+                payload: serde_json::to_value(record)?,
+                fetched_at_ms: now_ms,
+            })?;
+        }
+        if !fetched.is_empty() {
+            self.store.mark_coverage(&CoverageRange {
+                metric: METRIC.to_owned(),
+                from_ms: range.from_ms,
+                to_ms: range.to_ms,
+                source_endpoint: "/weightRecords".to_owned(),
+                synced_at_ms: now_ms,
+            })?;
+        }
+        self.read_weight(range)
+    }
+
+    fn read_weight(&self, range: TimeRange) -> Result<Vec<WeightRecord>, HealthError> {
+        self.store
+            .raw_records("weight", range.from_ms, range.to_ms)?
+            .into_iter()
+            .map(|record| serde_json::from_value(record.payload).map_err(HealthError::from))
+            .collect()
     }
 }
 

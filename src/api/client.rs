@@ -249,6 +249,35 @@ impl ZeppApiClient {
         Ok(response.json::<SportStatisticsEnvelope>().await?.items)
     }
 
+    /// Fetch weight/body-measurement records from the observed account endpoint.
+    /// The response schema varies, so it is preserved as raw JSON.
+    pub async fn fetch_weight_records(
+        &self,
+        from_ms: i64,
+        to_ms: i64,
+        limit: u32,
+    ) -> Result<serde_json::Value, ApiError> {
+        let path = format!("/users/{}/members/-1/weightRecords", self.user_id);
+        // Unlike the v2 event endpoints, this legacy endpoint expects Unix
+        // timestamps in seconds. The stable health layer intentionally keeps
+        // its ranges in milliseconds, so convert only at this API boundary.
+        let query = vec![
+            (
+                "fromTime".to_owned(),
+                weight_query_seconds(from_ms).to_string(),
+            ),
+            ("toTime".to_owned(), weight_query_seconds(to_ms).to_string()),
+            ("limit".to_owned(), limit.to_string()),
+            ("isForward".to_owned(), "0".to_owned()),
+        ];
+        let response = self.request(&path)?.query(&query).send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(ApiError::HttpStatus(status));
+        }
+        Ok(response.json().await?)
+    }
+
     /// Fetch a candidate or newly discovered endpoint as raw JSON.
     ///
     /// This is intentionally available for metrics whose event names or
@@ -330,5 +359,19 @@ impl ZeppApiClient {
         } else {
             Ok(())
         }
+    }
+}
+
+fn weight_query_seconds(timestamp_ms: i64) -> i64 {
+    timestamp_ms / 1_000
+}
+
+#[cfg(test)]
+mod tests {
+    use super::weight_query_seconds;
+
+    #[test]
+    fn weight_endpoint_uses_unix_seconds() {
+        assert_eq!(weight_query_seconds(1_790_897_839_000), 1_790_897_839);
     }
 }

@@ -145,12 +145,12 @@ The process reads MCP requests from stdin and writes responses to stdout. It
 must be kept running by the MCP client. It advertises:
 
 - `get_timeseries`: time-series data selected by `metric`, including `hrv`,
-  `resting_heart_rate`, `heart_rate_detail`, `sleep`, `activity`, `steps`, `calories`, `readiness`,
+  `resting_heart_rate`, `heart_rate_detail`, `sleep`, `activity`, `steps`, `calories`, `weight`, `readiness`,
   `respiratory_rate`, `charge`, `spo2`, `exertion`, `daily_health`, `stress`,
   `sport_load`, and `vo2_max`.
 - `get_summary`: authoritative processed summaries such as
   `resting_heart_rate`, `sleep_hrv`, `hrv_score`, `sleep_score`, daily steps,
-  daily calories, sport load, and VO₂ max.
+  daily calories, weight, sport load, and VO₂ max.
 - `get_events`: a structured event stream selected by `event_type` and
   optional `sub_type`.
 - `get_band_data`: detailed daily records with minute heart rate, sleep,

@@ -7,7 +7,7 @@ use thiserror::Error;
 
 use crate::health::{
     BandSource, CacheMode, DailyHealthRecord, EventRecord, EventSource, HealthClient, HealthError,
-    HrvPoint, HrvSource, SportSource, SportStatisticRecord, TimeRange,
+    HrvPoint, HrvSource, SportSource, SportStatisticRecord, TimeRange, WeightRecord, WeightSource,
 };
 
 #[derive(Debug, Error)]
@@ -32,7 +32,7 @@ impl<S> McpServer<S> {
 
 impl<S> McpServer<S>
 where
-    S: HrvSource + EventSource + BandSource + SportSource,
+    S: HrvSource + EventSource + BandSource + SportSource + WeightSource,
 {
     pub async fn handle(&self, request: Value) -> Result<Option<Value>, McpError> {
         let id = request.get("id").cloned();
@@ -123,6 +123,9 @@ where
                 self.get_sport_statistics(&sport_args).await?,
             )?);
         }
+        if metric == "weight" {
+            return Ok(serde_json::to_value(self.get_weight(args).await?)?);
+        }
         let (event_type, default_subtype) = match metric {
             "readiness" | "resting_heart_rate" => ("readiness", Some("watch_score")),
             "respiratory_rate" => ("RespiratoryRate", Some("real_data")),
@@ -180,6 +183,7 @@ where
                     self.get_sport_statistics(&forwarded).await?,
                 )?)
             }
+            "weight" => Ok(serde_json::to_value(self.get_weight(&forwarded).await?)?),
             _ => Err(McpError::InvalidRequest(format!(
                 "unsupported summary metric '{metric}'"
             ))),
@@ -246,6 +250,11 @@ where
             .sport_statistics(metric, from_date, to_date, range, mode, now_ms, refresh)
             .await?)
     }
+
+    async fn get_weight(&self, args: &Value) -> Result<Vec<WeightRecord>, McpError> {
+        let (range, mode, now_ms, refresh) = query_args(args)?;
+        Ok(self.health.weight(range, mode, now_ms, refresh).await?)
+    }
 }
 
 fn query_args(args: &Value) -> Result<(TimeRange, CacheMode, i64, Option<i64>), McpError> {
@@ -288,7 +297,7 @@ fn tools() -> Value {
     event_properties.insert("sub_type".into(), json!({"type":"string"}));
     json!([
         {"name":"get_timeseries","description":"Get a health time series for a selected metric. Use metric=hrv, readiness, respiratory_rate, charge, spo2, exertion, daily_health, or stress.","inputSchema":{"type":"object","required":["metric","start_ms","end_ms"],"properties":{
-            "metric":{"type":"string","description":"hrv, resting_heart_rate, heart_rate_detail (intraday samples), sleep, activity, steps, calories, readiness, respiratory_rate, charge, spo2, exertion, daily_health, stress, sport_load, or vo2_max"},
+            "metric":{"type":"string","description":"hrv, resting_heart_rate, heart_rate_detail (intraday samples), sleep, activity, steps, calories, weight, readiness, respiratory_rate, charge, spo2, exertion, daily_health, stress, sport_load, or vo2_max"},
             "start_ms":{"type":"integer"},"end_ms":{"type":"integer"},
             "from_date":{"type":"string","description":"Required for daily band or sport metrics (YYYY-MM-DD)"},"to_date":{"type":"string","description":"Required for daily band or sport metrics (YYYY-MM-DD)"},
             "cache_mode":{"type":"string","enum":["cache_only","cache_first","refresh"]},
@@ -346,7 +355,7 @@ fn now_ms() -> i64 {
 /// Serve newline-delimited JSON-RPC requests on stdin and responses on stdout.
 pub async fn run_stdio<S>(server: McpServer<S>) -> Result<(), McpError>
 where
-    S: HrvSource + EventSource + BandSource + SportSource,
+    S: HrvSource + EventSource + BandSource + SportSource + WeightSource,
 {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     let stdin = tokio::io::stdin();
