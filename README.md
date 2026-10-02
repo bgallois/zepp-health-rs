@@ -223,6 +223,20 @@ The exact settings screen and configuration filename differ between Claude,
 Cursor, VS Code, Codex, and other MCP clients. The important properties are
 the executable, the `mcp` argument, and the private environment variables.
 
+The MCP also provides `export_csv`. It accepts the same metric and time-range
+arguments as `get_timeseries`, writes the result below `ZEPP_EXPORT_DIR` (or
+`./exports` when unset), and returns the generated path and row count. For
+example, an agent can request:
+
+```text
+export_csv(metric="sleep", start_ms=..., end_ms=..., filename="sleep.csv")
+```
+
+Scalar and event fields become CSV columns. Nested values are retained as JSON
+inside a CSV cell, while sleep stages are expanded to one row per stage. The
+export filename is sanitized and cannot select a path outside the export
+directory.
+
 For Codex CLI, add the environment directly to `~/.codex/config.toml` (TOML
 does not expand `$ZEPP_TOKEN` from your interactive shell):
 

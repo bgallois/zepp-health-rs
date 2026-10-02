@@ -18,6 +18,8 @@ pub enum McpError {
     Health(#[from] HealthError),
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("CSV export failed: {0}")]
+    Export(#[from] std::io::Error),
 }
 
 pub struct McpServer<S> {
@@ -73,6 +75,7 @@ where
             "get_events" => serde_json::to_value(self.get_events(args).await?)?,
             "get_band_data" => serde_json::to_value(self.get_band_data(args).await?)?,
             "get_sport_statistics" => serde_json::to_value(self.get_sport_statistics(args).await?)?,
+            "export_csv" => serde_json::to_value(self.export_csv(args).await?)?,
             _ => {
                 return Ok(
                     json!({"isError":true,"content":[{"type":"text","text":"unknown tool"}]}),
@@ -255,6 +258,166 @@ where
         let (range, mode, now_ms, refresh) = query_args(args)?;
         Ok(self.health.weight(range, mode, now_ms, refresh).await?)
     }
+
+    async fn export_csv(&self, args: &Value) -> Result<ExportResult, McpError> {
+        let (metric, payload) =
+            if let Some(event_type) = args.get("event_type").and_then(Value::as_str) {
+                (
+                    event_type,
+                    serde_json::to_value(self.get_events(args).await?)?,
+                )
+            } else {
+                let metric = args.get("metric").and_then(Value::as_str).ok_or_else(|| {
+                    McpError::InvalidRequest("export_csv requires metric or event_type".into())
+                })?;
+                (metric, self.get_timeseries(args).await?)
+            };
+        let rows = csv_rows(metric, &payload);
+        if rows.is_empty() {
+            return Err(McpError::InvalidRequest(
+                "the requested metric returned no records".into(),
+            ));
+        }
+        let directory = std::env::var_os("ZEPP_EXPORT_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("exports"));
+        std::fs::create_dir_all(&directory)?;
+        let filename = args
+            .get("filename")
+            .and_then(Value::as_str)
+            .unwrap_or(metric);
+        let filename = safe_csv_filename(filename)?;
+        let path = directory.join(filename);
+        let row_count = rows.len();
+        let headers = csv_headers(&rows);
+        let mut writer = std::fs::File::create(&path)?;
+        write_csv_record(&mut writer, &headers)?;
+        for row in rows {
+            let values = headers
+                .iter()
+                .map(|header| row.get(header).map(String::as_str).unwrap_or(""))
+                .collect::<Vec<_>>();
+            write_csv_record(&mut writer, &values)?;
+        }
+        std::io::Write::flush(&mut writer)?;
+        Ok(ExportResult {
+            path: path.to_string_lossy().into_owned(),
+            metric: metric.to_owned(),
+            rows: row_count,
+        })
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ExportResult {
+    path: String,
+    metric: String,
+    rows: usize,
+}
+
+fn safe_csv_filename(filename: &str) -> Result<String, McpError> {
+    let mut name = filename.trim().replace(['/', '\\'], "_");
+    if name.is_empty() {
+        return Err(McpError::InvalidRequest("filename cannot be empty".into()));
+    }
+    if !name.ends_with(".csv") {
+        name.push_str(".csv");
+    }
+    if name == ".csv" || name == "..csv" {
+        return Err(McpError::InvalidRequest("invalid filename".into()));
+    }
+    Ok(name)
+}
+
+type CsvRow = std::collections::BTreeMap<String, String>;
+
+fn csv_rows(metric: &str, payload: &Value) -> Vec<CsvRow> {
+    let records = payload.as_array().cloned().unwrap_or_default();
+    if metric == "sleep" {
+        return records.iter().flat_map(sleep_csv_rows).collect();
+    }
+    records.iter().map(flatten_csv_record).collect()
+}
+
+fn flatten_csv_record(value: &Value) -> CsvRow {
+    let mut row = CsvRow::new();
+    if let Some(object) = value.as_object() {
+        for (key, value) in object {
+            row.insert(key.clone(), csv_value(value));
+        }
+    } else {
+        row.insert("value".into(), csv_value(value));
+    }
+    row
+}
+
+fn sleep_csv_rows(value: &Value) -> Vec<CsvRow> {
+    let Some(object) = value.as_object() else {
+        return vec![flatten_csv_record(value)];
+    };
+    let mut base = CsvRow::new();
+    if let Some(date) = object.get("date") {
+        base.insert("date".into(), csv_value(date));
+    }
+    if let Some(sleep) = object.get("sleep").and_then(Value::as_object) {
+        for (key, value) in sleep {
+            if key != "stages" {
+                base.insert(format!("sleep_{key}"), csv_value(value));
+            }
+        }
+        if let Some(stages) = sleep.get("stages").and_then(Value::as_array) {
+            return stages
+                .iter()
+                .map(|stage| {
+                    let mut row = base.clone();
+                    if let Some(stage) = stage.as_object() {
+                        for (key, value) in stage {
+                            row.insert(format!("stage_{key}"), csv_value(value));
+                        }
+                    }
+                    row
+                })
+                .collect();
+        }
+    }
+    vec![base]
+}
+
+fn csv_value(value: &Value) -> String {
+    match value {
+        Value::Null => String::new(),
+        Value::String(value) => value.clone(),
+        Value::Bool(value) => value.to_string(),
+        Value::Number(value) => value.to_string(),
+        Value::Array(_) | Value::Object(_) => value.to_string(),
+    }
+}
+
+fn csv_headers(rows: &[CsvRow]) -> Vec<String> {
+    rows.iter()
+        .flat_map(|row| row.keys().cloned())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn write_csv_record<W: std::io::Write>(
+    writer: &mut W,
+    fields: &[impl AsRef<str>],
+) -> Result<(), McpError> {
+    for (index, field) in fields.iter().enumerate() {
+        if index > 0 {
+            writer.write_all(b",")?;
+        }
+        let escaped = field.as_ref().replace('"', "\"\"");
+        if escaped.contains([',', '"', '\n', '\r']) {
+            write!(writer, "\"{escaped}\"")?;
+        } else {
+            writer.write_all(escaped.as_bytes())?;
+        }
+    }
+    writer.write_all(b"\n")?;
+    Ok(())
 }
 
 fn query_args(args: &Value) -> Result<(TimeRange, CacheMode, i64, Option<i64>), McpError> {
@@ -322,6 +485,16 @@ fn tools() -> Value {
             "start_ms":{"type":"integer"},"end_ms":{"type":"integer"},
             "cache_mode":{"type":"string","enum":["cache_only","cache_first","refresh"]},
             "now_ms":{"type":"integer"},"recent_refresh_ms":{"type":"integer"}
+        }}},
+        {"name":"export_csv","description":"Export any supported time-series metric or explicit event stream to a CSV file. Nested values are JSON columns; sleep stages are emitted as one row per stage. The file is written below ZEPP_EXPORT_DIR (default: ./exports).","inputSchema":{"type":"object","required":["start_ms","end_ms"],"properties":{
+            "metric":{"type":"string","description":"Any get_timeseries metric, such as hrv, sleep, heart_rate_detail, readiness, charge, sport_load, or weight"},
+            "event_type":{"type":"string","description":"Optional explicit event stream selector; use with sub_type instead of metric"},
+            "sub_type":{"type":"string"},
+            "start_ms":{"type":"integer"},"end_ms":{"type":"integer"},
+            "from_date":{"type":"string"},"to_date":{"type":"string"},
+            "filename":{"type":"string","description":"Optional filename; path components are removed and .csv is added"},
+            "cache_mode":{"type":"string","enum":["cache_only","cache_first","refresh"]},
+            "now_ms":{"type":"integer"},"recent_refresh_ms":{"type":"integer"}
         }}}
     ])
 }
@@ -385,4 +558,35 @@ where
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{csv_rows, safe_csv_filename};
+    use serde_json::json;
+
+    #[test]
+    fn sleep_csv_expands_each_stage_to_a_row() {
+        let rows = csv_rows(
+            "sleep",
+            &json!([{
+                "date": "2026-10-02",
+                "sleep": {
+                    "score": 78,
+                    "stages": [
+                        {"start_minute": 1, "end_minute": 2, "mode": 4},
+                        {"start_minute": 3, "end_minute": 4, "mode": 5}
+                    ]
+                }
+            }]),
+        );
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["date"], "2026-10-02");
+        assert_eq!(rows[1]["stage_mode"], "5");
+    }
+
+    #[test]
+    fn export_filename_cannot_escape_export_directory() {
+        assert_eq!(safe_csv_filename("../sleep").unwrap(), ".._sleep.csv");
+    }
 }
