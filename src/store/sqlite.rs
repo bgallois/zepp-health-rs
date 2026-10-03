@@ -128,6 +128,117 @@ impl Store {
         Ok(())
     }
 
+    #[cfg(feature = "intervals")]
+    pub fn migrate_intervals(&self) -> Result<(), StoreError> {
+        self.connection.execute_batch(
+            "CREATE TABLE IF NOT EXISTS intervals_activities (
+                activity_id TEXT PRIMARY KEY,
+                start_ms INTEGER NOT NULL,
+                end_ms INTEGER NOT NULL,
+                sport_type TEXT,
+                summary_json TEXT NOT NULL,
+                fetched_at_ms INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_intervals_activities_start
+                ON intervals_activities(start_ms);
+            CREATE TABLE IF NOT EXISTS intervals_activity_streams (
+                activity_id TEXT NOT NULL,
+                stream_type TEXT NOT NULL,
+                stream_json TEXT NOT NULL,
+                fetched_at_ms INTEGER NOT NULL,
+                PRIMARY KEY(activity_id, stream_type)
+            );",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(feature = "intervals")]
+    pub fn put_intervals_activity(
+        &self,
+        activity_id: &str,
+        start_ms: i64,
+        end_ms: i64,
+        sport_type: Option<&str>,
+        summary: &Value,
+        fetched_at_ms: i64,
+    ) -> Result<(), StoreError> {
+        self.migrate_intervals()?;
+        self.connection.execute(
+            "INSERT INTO intervals_activities(activity_id,start_ms,end_ms,sport_type,summary_json,fetched_at_ms)
+             VALUES (?1,?2,?3,?4,?5,?6)
+             ON CONFLICT(activity_id) DO UPDATE SET start_ms=excluded.start_ms,end_ms=excluded.end_ms,
+             sport_type=excluded.sport_type,summary_json=excluded.summary_json,fetched_at_ms=excluded.fetched_at_ms",
+            params![activity_id, start_ms, end_ms, sport_type, serde_json::to_string(summary)?, fetched_at_ms],
+        )?;
+        Ok(())
+    }
+
+    #[cfg(feature = "intervals")]
+    pub fn replace_intervals_streams(
+        &self,
+        activity_id: &str,
+        streams: &[(String, Value)],
+        fetched_at_ms: i64,
+    ) -> Result<(), StoreError> {
+        self.migrate_intervals()?;
+        let tx = self.connection.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM intervals_activity_streams WHERE activity_id=?1",
+            [activity_id],
+        )?;
+        for (stream_type, value) in streams {
+            tx.execute(
+                "INSERT INTO intervals_activity_streams(activity_id,stream_type,stream_json,fetched_at_ms) VALUES (?1,?2,?3,?4)",
+                params![activity_id, stream_type, serde_json::to_string(value)?, fetched_at_ms],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    #[cfg(feature = "intervals")]
+    pub fn intervals_activity_payloads(
+        &self,
+        from_ms: i64,
+        to_ms: i64,
+    ) -> Result<Vec<Value>, StoreError> {
+        self.migrate_intervals()?;
+        let mut stmt = self.connection.prepare("SELECT summary_json FROM intervals_activities WHERE start_ms<=?2 AND end_ms>=?1 ORDER BY start_ms")?;
+        let rows = stmt.query_map(params![from_ms, to_ms], |row| {
+            let raw: String = row.get(0)?;
+            serde_json::from_str(&raw).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    #[cfg(feature = "intervals")]
+    pub fn intervals_stream_payloads(
+        &self,
+        activity_id: &str,
+    ) -> Result<Vec<(String, Value)>, StoreError> {
+        self.migrate_intervals()?;
+        let mut stmt = self.connection.prepare("SELECT stream_type,stream_json FROM intervals_activity_streams WHERE activity_id=?1 ORDER BY stream_type")?;
+        let rows = stmt.query_map([activity_id], |row| {
+            let kind: String = row.get(0)?;
+            let raw: String = row.get(1)?;
+            let value = serde_json::from_str(&raw).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    1,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?;
+            Ok((kind, value))
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     pub fn put_raw_record(&self, record: &RawRecord) -> Result<(), StoreError> {
         let payload = serde_json::to_string(&record.payload)?;
         self.connection.execute(

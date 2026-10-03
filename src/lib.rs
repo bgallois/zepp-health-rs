@@ -5,5 +5,7 @@
 
 pub mod api;
 pub mod health;
+#[cfg(feature = "intervals")]
+pub mod intervals;
 pub mod mcp;
 pub mod store;

@@ -13,8 +13,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         let path =
             std::env::var("ZEPP_DB_PATH").unwrap_or_else(|_| "zepp-health.sqlite3".to_owned());
-        let store = zepp_health_rs::store::Store::open(path)?;
+        #[cfg(feature = "intervals")]
+        let intervals = zepp_health_rs::intervals::IntervalsHealthClient::from_env(&path)?;
+        let store = zepp_health_rs::store::Store::open(&path)?;
         let health = zepp_health_rs::health::HealthClient::new(store, source);
+        #[cfg(feature = "intervals")]
+        zepp_health_rs::mcp::run_stdio(zepp_health_rs::mcp::McpServer::new_with_intervals(
+            health, intervals,
+        ))
+        .await?;
+        #[cfg(not(feature = "intervals"))]
         zepp_health_rs::mcp::run_stdio(zepp_health_rs::mcp::McpServer::new(health)).await?;
     } else {
         println!(

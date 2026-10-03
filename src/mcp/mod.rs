@@ -9,6 +9,8 @@ use crate::health::{
     BandSource, CacheMode, DailyHealthRecord, EventRecord, EventSource, HealthClient, HealthError,
     HrvPoint, HrvSource, SportSource, SportStatisticRecord, TimeRange, WeightRecord, WeightSource,
 };
+#[cfg(feature = "intervals")]
+use crate::intervals::{ActivityStream, ActivitySummary, IntervalsError, IntervalsHealthClient};
 
 #[derive(Debug, Error)]
 pub enum McpError {
@@ -20,15 +22,32 @@ pub enum McpError {
     Json(#[from] serde_json::Error),
     #[error("CSV export failed: {0}")]
     Export(#[from] std::io::Error),
+    #[cfg(feature = "intervals")]
+    #[error("Intervals query failed: {0}")]
+    Intervals(#[from] IntervalsError),
 }
 
 pub struct McpServer<S> {
     health: HealthClient<S>,
+    #[cfg(feature = "intervals")]
+    intervals: Option<IntervalsHealthClient>,
 }
 
 impl<S> McpServer<S> {
     pub fn new(health: HealthClient<S>) -> Self {
-        Self { health }
+        Self {
+            health,
+            #[cfg(feature = "intervals")]
+            intervals: None,
+        }
+    }
+
+    #[cfg(feature = "intervals")]
+    pub fn new_with_intervals(
+        health: HealthClient<S>,
+        intervals: Option<IntervalsHealthClient>,
+    ) -> Self {
+        Self { health, intervals }
     }
 }
 
@@ -75,6 +94,8 @@ where
             "get_events" => serde_json::to_value(self.get_events(args).await?)?,
             "get_band_data" => serde_json::to_value(self.get_band_data(args).await?)?,
             "get_sport_statistics" => serde_json::to_value(self.get_sport_statistics(args).await?)?,
+            #[cfg(feature = "intervals")]
+            "get_activities" => serde_json::to_value(self.get_activities(args).await?)?,
             "export_csv" => serde_json::to_value(self.export_csv(args).await?)?,
             _ => {
                 return Ok(
@@ -128,6 +149,10 @@ where
         }
         if metric == "weight" {
             return Ok(serde_json::to_value(self.get_weight(args).await?)?);
+        }
+        #[cfg(feature = "intervals")]
+        if metric == "activity_stream" {
+            return Ok(serde_json::to_value(self.get_activity_stream(args).await?)?);
         }
         let (event_type, default_subtype) = match metric {
             "readiness" | "resting_heart_rate" => ("readiness", Some("watch_score")),
@@ -257,6 +282,77 @@ where
     async fn get_weight(&self, args: &Value) -> Result<Vec<WeightRecord>, McpError> {
         let (range, mode, now_ms, refresh) = query_args(args)?;
         Ok(self.health.weight(range, mode, now_ms, refresh).await?)
+    }
+
+    #[cfg(feature = "intervals")]
+    async fn get_activities(&self, args: &Value) -> Result<Vec<ActivitySummary>, McpError> {
+        let from_ms = args
+            .get("start_ms")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| McpError::InvalidRequest("get_activities requires start_ms".into()))?;
+        let to_ms = args
+            .get("end_ms")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| McpError::InvalidRequest("get_activities requires end_ms".into()))?;
+        let source = args.get("source").and_then(Value::as_str).unwrap_or("all");
+        if !matches!(source, "all" | "intervals" | "zepp") {
+            return Err(McpError::InvalidRequest(
+                "source must be all, intervals, or zepp".into(),
+            ));
+        }
+        if source == "zepp" {
+            return Err(McpError::InvalidRequest("Zepp workout summaries are not exposed by the stable API yet; use get_band_data for daily activity records".into()));
+        }
+        let Some(intervals) = self.intervals.as_ref() else {
+            if source == "intervals" {
+                return Err(McpError::InvalidRequest(
+                    "Intervals support is compiled in but INTERVALS_TOKEN is not configured".into(),
+                ));
+            }
+            return Ok(Vec::new());
+        };
+        let mode = args
+            .get("cache_mode")
+            .and_then(Value::as_str)
+            .unwrap_or("cache_first");
+        Ok(intervals.activities(from_ms, to_ms, mode).await?)
+    }
+
+    #[cfg(feature = "intervals")]
+    async fn get_activity_stream(&self, args: &Value) -> Result<Vec<ActivityStream>, McpError> {
+        let activity_id = args
+            .get("activity_id")
+            .and_then(|value| {
+                value
+                    .as_str()
+                    .map(str::to_owned)
+                    .or_else(|| value.as_i64().map(|id| id.to_string()))
+            })
+            .ok_or_else(|| {
+                McpError::InvalidRequest("activity_stream requires activity_id".into())
+            })?;
+        let stream_types = args
+            .get("stream_types")
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            });
+        let Some(intervals) = self.intervals.as_ref() else {
+            return Err(McpError::InvalidRequest(
+                "Intervals support is compiled in but INTERVALS_TOKEN is not configured".into(),
+            ));
+        };
+        let mode = args
+            .get("cache_mode")
+            .and_then(Value::as_str)
+            .unwrap_or("cache_first");
+        Ok(intervals
+            .activity_streams(&activity_id, stream_types.as_deref(), mode)
+            .await?)
     }
 
     async fn export_csv(&self, args: &Value) -> Result<ExportResult, McpError> {
@@ -451,6 +547,7 @@ fn query_args(args: &Value) -> Result<(TimeRange, CacheMode, i64, Option<i64>), 
     Ok((TimeRange::new(from_ms, to_ms)?, mode, now_ms, refresh))
 }
 
+#[allow(unused_mut)]
 fn tools() -> Value {
     let mut event_properties = query_properties()
         .as_object()
@@ -458,10 +555,12 @@ fn tools() -> Value {
         .expect("query properties must be an object");
     event_properties.insert("event_type".into(), json!({"type":"string"}));
     event_properties.insert("sub_type".into(), json!({"type":"string"}));
-    json!([
+    let mut tools = json!([
         {"name":"get_timeseries","description":"Get a health time series for a selected metric. Use metric=hrv, readiness, respiratory_rate, charge, spo2, exertion, daily_health, or stress.","inputSchema":{"type":"object","required":["metric","start_ms","end_ms"],"properties":{
-            "metric":{"type":"string","description":"hrv, resting_heart_rate, heart_rate_detail (intraday samples), sleep, activity, steps, calories, weight, readiness, respiratory_rate, charge, spo2, exertion, daily_health, stress, sport_load, or vo2_max"},
+            "metric":{"type":"string","description":"hrv, resting_heart_rate, heart_rate_detail (intraday samples), sleep, activity, steps, calories, weight, readiness, respiratory_rate, charge, spo2, exertion, daily_health, stress, sport_load, vo2_max, or activity_stream (Intervals build)"},
             "start_ms":{"type":"integer"},"end_ms":{"type":"integer"},
+            "activity_id":{"type":["string","integer"],"description":"Required for metric=activity_stream"},
+            "stream_types":{"type":"array","items":{"type":"string"}},
             "from_date":{"type":"string","description":"Required for daily band or sport metrics (YYYY-MM-DD)"},"to_date":{"type":"string","description":"Required for daily band or sport metrics (YYYY-MM-DD)"},
             "cache_mode":{"type":"string","enum":["cache_only","cache_first","refresh"]},
             "now_ms":{"type":"integer"},"recent_refresh_ms":{"type":"integer"}
@@ -496,7 +595,12 @@ fn tools() -> Value {
             "cache_mode":{"type":"string","enum":["cache_only","cache_first","refresh"]},
             "now_ms":{"type":"integer"},"recent_refresh_ms":{"type":"integer"}
         }}}
-    ])
+    ]);
+    #[cfg(feature = "intervals")]
+    if let Some(items) = tools.as_array_mut() {
+        items.push(json!({"name":"get_activities","description":"Get activity summaries in a time range. Intervals summaries are preferred when available; use source=intervals or source=all. Mean power and other provider fields are preserved.","inputSchema":{"type":"object","required":["start_ms","end_ms"],"properties":{"start_ms":{"type":"integer"},"end_ms":{"type":"integer"},"source":{"type":"string","enum":["all","intervals","zepp"]},"cache_mode":{"type":"string","enum":["cache_only","cache_first","refresh"]}}}}));
+    }
+    tools
 }
 
 fn query_properties() -> Value {

@@ -290,6 +290,55 @@ This project handles sensitive personal health data. Recommended practices:
 - Do not commit `zepp-health.sqlite3`, tokens, cookies, or raw personal data.
 - Review MCP tool calls before granting an AI agent access to the database.
 
+## Optional Intervals activity support
+
+Intervals support is an optional compile-time feature. A normal build contains no
+Intervals code or storage tables:
+
+```bash
+cargo build --release
+```
+
+Build the MCP with Intervals support with:
+
+```bash
+cargo build --release --features intervals
+```
+
+When enabled, set your Intervals.icu personal API key in the MCP process environment:
+
+```toml
+[mcp_servers.zepp-health.env]
+INTERVALS_TOKEN = "replace-with-your-intervals-api-key"
+```
+
+The key is sent as HTTP Basic authentication with username `API_KEY`; the
+athlete path uses Intervals.icu's `0` owner shortcut. Intervals.icu documents
+personal API-key authentication and activity/stream endpoints in its [Open API
+documentation](https://www.intervals.icu/features/open-api/).
+
+The feature adds `get_activities`, which retrieves activity summaries for a
+range and preserves provider fields such as `average_watts`, `weighted_average_watts`,
+heart-rate, distance, elevation, and sport type. It also adds
+`get_timeseries` with `metric="activity_stream"` for an activity. The default
+streams are `time`, `heartrate`, `watts`, `cadence`, `distance`, `altitude`,
+`velocity_smooth`, and `temp`; pass `stream_types` to request a narrower set.
+
+Use `cache_first`, `cache_only`, or `refresh` consistently with the Zepp tools.
+Intervals records are stored in their own `intervals_activities` and
+`intervals_activity_streams` tables, so a Zepp-only process and an Intervals-enabled
+process can use the same database without overwriting one another. Intervals
+activity rows are upserted only by their Intervals activity ID.
+
+`source="intervals"` requires the feature and token. `source="all"` uses Intervals
+when configured; Zepp daily activity remains available through `get_band_data`.
+The stable Zepp API currently exposes daily band activity rather than a
+documented, typed workout-summary endpoint, so Zepp workout/Intervals
+deduplication is not silently inferred. Once a documented Zepp workout source
+is available, matching must be interval-based (with any start-time tolerance
+explicitly marked as a heuristic), and a single Intervals activity may relate to
+multiple Zepp fragments.
+
 ## Static builds and GitHub releases
 
 The repository includes a GitHub Actions release workflow. It builds a

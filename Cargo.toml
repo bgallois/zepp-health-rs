@@ -10,6 +10,10 @@ readme = "README.md"
 keywords = ["zepp", "health", "amazfit", "api"]
 categories = ["api-bindings"]
 
+[features]
+default = ["intervals"]
+intervals = []
+
 [dependencies]
 base64 = "0.22"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
