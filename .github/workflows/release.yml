@@ -57,7 +57,13 @@ jobs:
         run: |
           set -euo pipefail
           tag="${{ inputs.tag || github.ref_name }}"
-          [[ "$tag" == v* ]]
+          # Manual dispatch may publish the rolling release under the stable
+          # `continuous` tag; tagged releases use the conventional `v*` form.
+          [[ -n "$tag" ]]
+          if [[ "$tag" != continuous && "$tag" != v* ]]; then
+            echo "tag must be 'continuous' or start with v: $tag" >&2
+            exit 1
+          fi
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" \
               dist/zepp-health-rs-x86_64-unknown-linux-musl \
