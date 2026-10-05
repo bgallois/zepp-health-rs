@@ -1,6 +1,6 @@
 //! Provider-independent health queries over the local store.
 
-use std::{collections::BTreeMap, future::Future, pin::Pin};
+use std::{collections::BTreeMap, future::Future, pin::Pin, rc::Rc};
 
 use serde_json::json;
 use thiserror::Error;
@@ -109,6 +109,34 @@ pub struct EventRecord {
     pub value: Option<serde_json::Value>,
     pub data: Option<String>,
     pub extra: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct DataProvenance {
+    pub provider: String,
+    pub external: bool,
+    pub device_id: Option<String>,
+    pub device_label: Option<String>,
+    pub record_date: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct ExternalWellnessRecord {
+    pub metric: String,
+    pub record_date: String,
+    pub timestamp_ms: Option<i64>,
+    pub value: Option<serde_json::Value>,
+    pub fields: serde_json::Map<String, serde_json::Value>,
+    pub provenance: DataProvenance,
+}
+
+pub trait ExternalWellnessSource {
+    fn fetch_wellness<'a>(
+        &'a self,
+        metric: &'a str,
+        range: TimeRange,
+        mode: CacheMode,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ExternalWellnessRecord>, HealthError>> + 'a>>;
 }
 
 pub trait EventSource: Send + Sync {
@@ -344,6 +372,8 @@ pub enum HealthError {
     Json(#[from] serde_json::Error),
     #[error("cached sample has invalid value: {0}")]
     InvalidCachedValue(String),
+    #[error("external wellness provider error: {0}")]
+    External(String),
 }
 
 fn next_date(date: &str) -> Result<String, HealthError> {
@@ -423,11 +453,33 @@ impl HrvSource for ZeppApiClient {
 pub struct HealthClient<S> {
     store: Store,
     source: S,
+    external_wellness: Option<Rc<dyn ExternalWellnessSource>>,
 }
 
 impl<S: HrvSource> HealthClient<S> {
     pub fn new(store: Store, source: S) -> Self {
-        Self { store, source }
+        Self {
+            store,
+            source,
+            external_wellness: None,
+        }
+    }
+
+    pub fn with_external_wellness(mut self, source: Rc<dyn ExternalWellnessSource>) -> Self {
+        self.external_wellness = Some(source);
+        self
+    }
+
+    pub async fn external_wellness(
+        &self,
+        metric: &str,
+        range: TimeRange,
+        mode: CacheMode,
+    ) -> Result<Vec<ExternalWellnessRecord>, HealthError> {
+        let Some(source) = &self.external_wellness else {
+            return Ok(Vec::new());
+        };
+        source.fetch_wellness(metric, range, mode).await
     }
 
     pub async fn hrv(

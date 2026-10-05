@@ -66,7 +66,7 @@ where
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {"listChanged": false}},
                 "serverInfo": {"name": "zepp-health-rs", "version": env!("CARGO_PKG_VERSION")},
-                "instructions": "Use get_summary first for named health metrics such as resting heart rate, sleep HRV, HRV score, sleep score, daily steps, daily calories, sport load, and VO2 max. Use get_timeseries only when the user asks for detailed samples, a custom aggregation, or analysis that cannot be answered by a provider summary. Do not derive a named summary from raw samples when Zepp provides an authoritative processed value."
+                "instructions": "Use get_summary first for named health metrics such as resting heart rate, sleep HRV, HRV score, sleep score, daily steps, daily calories, sport load, and VO2 max. Summary results may merge Zepp and Intervals.icu records to fill date gaps. Always inspect each record's provenance.provider and provenance.external fields and report provider coverage when relevant; provider=zepp is device data, provider=intervals with external=true is external wellness data. Treat external records as supplemental and potentially not directly comparable to Zepp values because they may come from another device, algorithm, timezone, or measurement context. Do not silently combine providers into a single average, trend, baseline, or causal conclusion; keep provider-specific statistics separate and clearly label any comparison as approximate. Use get_timeseries only when the user asks for detailed samples, a custom aggregation, or analysis that cannot be answered by a provider summary. Do not derive a named summary from raw samples when Zepp provides an authoritative processed value."
             }),
             "notifications/initialized" => return Ok(None),
             "tools/list" => json!({"tools": tools()}),
@@ -194,12 +194,29 @@ where
             "resting_heart_rate" | "sleep_hrv" | "hrv_score" | "skin_temperature" => {
                 object.insert("event_type".into(), Value::String("readiness".into()));
                 object.insert("sub_type".into(), Value::String("watch_score".into()));
-                Ok(serde_json::to_value(self.get_events(&forwarded).await?)?)
+                self.summary_with_fallback(
+                    metric,
+                    forwarded.clone(),
+                    serde_json::to_value(self.get_events(&forwarded).await?)?,
+                )
+                .await
             }
             "sleep_score" | "daily_steps" | "daily_calories" | "daily_summary" => {
-                Ok(serde_json::to_value(self.get_band_data(&forwarded).await?)?)
+                self.summary_with_fallback(
+                    metric,
+                    forwarded.clone(),
+                    serde_json::to_value(self.get_band_data(&forwarded).await?)?,
+                )
+                .await
             }
-            "sleep" => Ok(serde_json::to_value(self.get_sleep(&forwarded).await?)?),
+            "sleep" => {
+                self.summary_with_fallback(
+                    metric,
+                    forwarded.clone(),
+                    serde_json::to_value(self.get_sleep(&forwarded).await?)?,
+                )
+                .await
+            }
             "sport_load" | "vo2_max" => {
                 let statistic_metric = if metric == "sport_load" {
                     "SPORT_LOAD"
@@ -207,15 +224,59 @@ where
                     "VO2_MAX"
                 };
                 object.insert("metric".into(), Value::String(statistic_metric.into()));
-                Ok(serde_json::to_value(
-                    self.get_sport_statistics(&forwarded).await?,
-                )?)
+                self.summary_with_fallback(
+                    metric,
+                    forwarded.clone(),
+                    serde_json::to_value(self.get_sport_statistics(&forwarded).await?)?,
+                )
+                .await
             }
-            "weight" => Ok(serde_json::to_value(self.get_weight(&forwarded).await?)?),
+            "weight" => {
+                self.summary_with_fallback(
+                    metric,
+                    forwarded.clone(),
+                    serde_json::to_value(self.get_weight(&forwarded).await?)?,
+                )
+                .await
+            }
             _ => Err(McpError::InvalidRequest(format!(
                 "unsupported summary metric '{metric}'"
             ))),
         }
+    }
+
+    async fn summary_with_fallback(
+        &self,
+        metric: &str,
+        args: Value,
+        zepp: Value,
+    ) -> Result<Value, McpError> {
+        #[cfg(not(feature = "intervals"))]
+        let _ = (metric, &args);
+        let value = annotate_zepp_provenance(zepp);
+        #[cfg(feature = "intervals")]
+        {
+            let (range, mode, _, _) = query_args(&args)?;
+            let external = self.health.external_wellness(metric, range, mode).await?;
+            if !external.is_empty() {
+                let covered: std::collections::HashSet<String> = value
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(json_record_date)
+                    .collect();
+                let mut merged = value.as_array().cloned().unwrap_or_default();
+                merged.extend(
+                    external
+                        .into_iter()
+                        .filter(|record| !covered.contains(&record.record_date))
+                        .map(serde_json::to_value)
+                        .collect::<Result<Vec<_>, _>>()?,
+                );
+                return Ok(Value::Array(merged));
+            }
+        }
+        Ok(value)
     }
 
     async fn get_events(&self, args: &Value) -> Result<Vec<EventRecord>, McpError> {
@@ -404,6 +465,43 @@ where
     }
 }
 
+fn annotate_zepp_provenance(value: Value) -> Value {
+    let Value::Array(records) = value else {
+        return value;
+    };
+    Value::Array(
+        records
+            .into_iter()
+            .map(|mut record| {
+                #[cfg(feature = "intervals")]
+                let record_date = json_record_date(&record);
+                #[cfg(not(feature = "intervals"))]
+                let record_date: Option<String> = None;
+                if let Some(object) = record.as_object_mut() {
+                    let device_id = object
+                        .get("value")
+                        .and_then(Value::as_object)
+                        .and_then(|value| value.get("deviceId"))
+                        .cloned();
+                    if !object.contains_key("provenance") {
+                        object.insert(
+                            "provenance".into(),
+                            json!({
+                                "provider": "zepp",
+                                "external": false,
+                                "device_id": device_id,
+                                "device_label": Value::Null,
+                                "record_date": record_date,
+                            }),
+                        );
+                    }
+                }
+                record
+            })
+            .collect(),
+    )
+}
+
 #[derive(Debug, serde::Serialize)]
 struct ExportResult {
     path: String,
@@ -545,6 +643,45 @@ fn query_args(args: &Value) -> Result<(TimeRange, CacheMode, i64, Option<i64>), 
         .unwrap_or_else(now_ms);
     let refresh = args.get("recent_refresh_ms").and_then(Value::as_i64);
     Ok((TimeRange::new(from_ms, to_ms)?, mode, now_ms, refresh))
+}
+
+#[cfg(feature = "intervals")]
+fn json_record_date(value: &Value) -> Option<String> {
+    let object = value.as_object()?;
+    if let Some(date) = object
+        .get("date")
+        .or_else(|| object.get("record_date"))
+        .and_then(Value::as_str)
+    {
+        return Some(date.to_owned());
+    }
+    let timestamp = object
+        .get("timestamp_ms")
+        .and_then(Value::as_i64)
+        .or_else(|| {
+            object
+                .get("value")
+                .and_then(Value::as_object)
+                .and_then(|nested| nested.get("timestamp"))
+                .and_then(Value::as_i64)
+        })?;
+    Some(date_from_timestamp_ms(timestamp))
+}
+
+#[cfg(feature = "intervals")]
+fn date_from_timestamp_ms(timestamp_ms: i64) -> String {
+    let days = timestamp_ms.div_euclid(86_400_000);
+    let z = days + 719_468;
+    let era = (if z >= 0 { z } else { z - 146_096 }) / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    let year = year + i64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02}")
 }
 
 #[allow(unused_mut)]

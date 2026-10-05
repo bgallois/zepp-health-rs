@@ -13,6 +13,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use thiserror::Error;
 
+use crate::health::{
+    CacheMode, DataProvenance, ExternalWellnessRecord, ExternalWellnessSource, HealthError,
+    TimeRange,
+};
 use crate::store::{Store, StoreError};
 
 const API_ROOT: &str = "https://intervals.icu/api/v1";
@@ -201,6 +205,121 @@ impl IntervalsHealthClient {
             })
             .collect())
     }
+
+    pub async fn wellness(
+        &self,
+        metric: &str,
+        range: TimeRange,
+        mode: CacheMode,
+    ) -> Result<Vec<ExternalWellnessRecord>, IntervalsError> {
+        let from_date = date_from_ms(range.from_ms);
+        let to_date = date_from_ms(range.to_ms);
+        let field = wellness_field(metric);
+        if mode != CacheMode::Refresh {
+            let cached = self
+                .store
+                .intervals_wellness_payloads(&from_date, &to_date)?;
+            if !cached.is_empty() || mode == CacheMode::CacheOnly {
+                return wellness_records(metric, field, cached);
+            }
+        }
+        if mode == CacheMode::CacheOnly {
+            return Ok(Vec::new());
+        }
+        let response = self
+            .http
+            .get(format!("{API_ROOT}/athlete/0/wellness"))
+            .basic_auth("API_KEY", Some(&self.token))
+            .query(&[("oldest", from_date.clone()), ("newest", to_date.clone())])
+            .send()
+            .await?;
+        let response = response.error_for_status().map_err(|e| {
+            e.status()
+                .map(IntervalsError::HttpStatus)
+                .unwrap_or_else(|| IntervalsError::Transport(e))
+        })?;
+        let values: Vec<Value> = response.json().await?;
+        let fetched_at = now_ms();
+        for value in &values {
+            let date = value.get("id").and_then(Value::as_str).ok_or_else(|| {
+                IntervalsError::InvalidData("wellness record has no id date".into())
+            })?;
+            self.store.put_intervals_wellness(date, value, fetched_at)?;
+        }
+        wellness_records(metric, field, values)
+    }
+}
+
+impl ExternalWellnessSource for IntervalsHealthClient {
+    fn fetch_wellness<'a>(
+        &'a self,
+        metric: &'a str,
+        range: TimeRange,
+        mode: CacheMode,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<Vec<ExternalWellnessRecord>, HealthError>> + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            self.wellness(metric, range, mode)
+                .await
+                .map_err(|error| HealthError::External(error.to_string()))
+        })
+    }
+}
+
+fn wellness_field(metric: &str) -> Option<&str> {
+    match metric {
+        "resting_heart_rate" => Some("restingHR"),
+        "sleep_hrv" => Some("hrv"),
+        "weight" => Some("weight"),
+        "sleep_score" => Some("sleepScore"),
+        "sleep_duration" | "sleep" => Some("sleepSecs"),
+        "avg_sleeping_hr" => Some("avgSleepingHR"),
+        "sleep_quality" => Some("sleepQuality"),
+        "soreness" => Some("soreness"),
+        "fatigue" => Some("fatigue"),
+        "stress" => Some("stress"),
+        "mood" => Some("mood"),
+        "motivation" => Some("motivation"),
+        _ => None,
+    }
+}
+
+fn wellness_records(
+    metric: &str,
+    field: Option<&str>,
+    values: Vec<Value>,
+) -> Result<Vec<ExternalWellnessRecord>, IntervalsError> {
+    let Some(field) = field else {
+        return Ok(Vec::new());
+    };
+    values
+        .into_iter()
+        .filter_map(|value| {
+            let object = value.as_object()?.clone();
+            let date = object.get("id")?.as_str()?.to_owned();
+            let value = object.get(field)?.clone();
+            if value.is_null() {
+                return None;
+            }
+            Some(Ok(ExternalWellnessRecord {
+                metric: metric.to_owned(),
+                record_date: date.clone(),
+                timestamp_ms: None,
+                value: Some(value),
+                fields: object,
+                provenance: DataProvenance {
+                    provider: "intervals".into(),
+                    external: true,
+                    device_id: None,
+                    device_label: Some("Intervals.icu".into()),
+                    record_date: Some(date),
+                },
+            }))
+        })
+        .collect()
 }
 
 fn parse_activity(value: Value) -> Result<ActivitySummary, IntervalsError> {
@@ -370,7 +489,9 @@ impl<T> Pipe for T {}
 
 #[cfg(test)]
 mod tests {
-    use super::{days_from_civil, parse_rfc3339_ms, stream_pairs};
+    use super::{
+        days_from_civil, parse_rfc3339_ms, stream_pairs, wellness_field, wellness_records,
+    };
     use serde_json::json;
 
     #[test]
@@ -390,5 +511,21 @@ mod tests {
             stream_pairs(json!({"watts":{"data":[1]}})).unwrap().len(),
             1
         );
+    }
+
+    #[test]
+    fn wellness_records_preserve_external_provenance_and_fields() {
+        let records = wellness_records(
+            "resting_heart_rate",
+            wellness_field("resting_heart_rate"),
+            vec![json!({"id":"2026-10-02","restingHR":48,"sleepScore":78,"unknown":true})],
+        )
+        .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].record_date, "2026-10-02");
+        assert_eq!(records[0].value, Some(json!(48)));
+        assert!(records[0].provenance.external);
+        assert_eq!(records[0].fields.get("unknown"), Some(&json!(true)));
+        assert!(records[0].timestamp_ms.is_none());
     }
 }

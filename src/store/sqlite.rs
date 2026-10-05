@@ -141,6 +141,11 @@ impl Store {
             );
             CREATE INDEX IF NOT EXISTS idx_intervals_activities_start
                 ON intervals_activities(start_ms);
+            CREATE TABLE IF NOT EXISTS intervals_wellness (
+                record_date TEXT PRIMARY KEY,
+                payload_json TEXT NOT NULL,
+                fetched_at_ms INTEGER NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS intervals_activity_streams (
                 activity_id TEXT NOT NULL,
                 stream_type TEXT NOT NULL,
@@ -150,6 +155,48 @@ impl Store {
             );",
         )?;
         Ok(())
+    }
+
+    #[cfg(feature = "intervals")]
+    pub fn put_intervals_wellness(
+        &self,
+        record_date: &str,
+        payload: &Value,
+        fetched_at_ms: i64,
+    ) -> Result<(), StoreError> {
+        self.migrate_intervals()?;
+        self.connection.execute(
+            "INSERT INTO intervals_wellness(record_date,payload_json,fetched_at_ms)
+             VALUES (?1,?2,?3)
+             ON CONFLICT(record_date) DO UPDATE SET payload_json=excluded.payload_json,
+             fetched_at_ms=excluded.fetched_at_ms",
+            params![record_date, serde_json::to_string(payload)?, fetched_at_ms],
+        )?;
+        Ok(())
+    }
+
+    #[cfg(feature = "intervals")]
+    pub fn intervals_wellness_payloads(
+        &self,
+        from_date: &str,
+        to_date: &str,
+    ) -> Result<Vec<Value>, StoreError> {
+        self.migrate_intervals()?;
+        let mut stmt = self.connection.prepare(
+            "SELECT payload_json FROM intervals_wellness
+             WHERE record_date>=?1 AND record_date<=?2 ORDER BY record_date",
+        )?;
+        let rows = stmt.query_map(params![from_date, to_date], |row| {
+            let raw: String = row.get(0)?;
+            serde_json::from_str(&raw).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
     #[cfg(feature = "intervals")]
