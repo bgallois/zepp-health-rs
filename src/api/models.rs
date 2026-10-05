@@ -1,5 +1,5 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned, de::Deserializer};
 use serde_json::Value;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -41,6 +41,7 @@ pub struct StepSummary {
     pub cal: Option<u64>,
     pub run_cal: Option<u64>,
     pub run_dist: Option<u64>,
+    #[serde(default, deserialize_with = "deserialize_stage_vec")]
     pub stage: Vec<ActivityStage>,
 }
 
@@ -60,6 +61,7 @@ pub struct SleepSummary {
     pub ed: Option<i64>,
     pub rhr: Option<u16>,
     pub ss: Option<u16>,
+    #[serde(default, deserialize_with = "deserialize_stage_vec")]
     pub stage: Vec<SleepStage>,
 }
 
@@ -69,6 +71,22 @@ pub struct SleepStage {
     pub start: u32,
     pub stop: u32,
     pub mode: u16,
+}
+
+/// Decode Zepp stage arrays defensively. A malformed or incomplete stage is
+/// skipped so unrelated daily metrics (steps, calories, heart rate) remain
+/// available. The raw health payload is deliberately not logged.
+fn deserialize_stage_vec<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: DeserializeOwned,
+{
+    let raw = Value::deserialize(deserializer)?;
+    let values = raw.as_array().cloned().unwrap_or_default();
+    Ok(values
+        .into_iter()
+        .filter_map(|value| serde_json::from_value(value).ok())
+        .collect())
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

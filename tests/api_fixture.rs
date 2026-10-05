@@ -1,3 +1,4 @@
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use zepp_health_rs::api::BandDataRecord;
 
 #[test]
@@ -33,4 +34,48 @@ fn invalid_summary_is_reported() {
         uuid: None,
     };
     assert!(record.decode_summary().is_err());
+}
+
+#[test]
+fn incomplete_sleep_stages_do_not_block_step_summary() {
+    let payload = serde_json::json!({
+        "stp": {"ttl": 42, "dis": 10, "stage": [{"start": 1, "stop": 2, "mode": 3}]},
+        "slp": {"st": 100, "ed": 200, "stage": [
+            {"start": 1, "stop": 2, "mode": 4},
+            {"start": 3, "stop": 4}
+        ]}
+    });
+    let record = BandDataRecord {
+        uid: None,
+        data_type: None,
+        date_time: "2026-01-01".into(),
+        source: None,
+        summary: STANDARD.encode(serde_json::to_vec(&payload).unwrap()),
+        data_hr: None,
+        data: None,
+        device_id: None,
+        uuid: None,
+    };
+    let summary = record.decode_summary().unwrap();
+    assert_eq!(summary.stp.unwrap().ttl, Some(42));
+    assert_eq!(summary.slp.unwrap().stage.len(), 1);
+}
+
+#[test]
+fn missing_stage_arrays_are_tolerated() {
+    let payload = serde_json::json!({"stp": {"ttl": 7, "stage": null}, "slp": {"ss": 80, "stage": "invalid"}});
+    let record = BandDataRecord {
+        uid: None,
+        data_type: None,
+        date_time: "2026-01-01".into(),
+        source: None,
+        summary: STANDARD.encode(serde_json::to_vec(&payload).unwrap()),
+        data_hr: None,
+        data: None,
+        device_id: None,
+        uuid: None,
+    };
+    let summary = record.decode_summary().unwrap();
+    assert!(summary.stp.unwrap().stage.is_empty());
+    assert!(summary.slp.unwrap().stage.is_empty());
 }

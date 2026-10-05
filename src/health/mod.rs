@@ -657,7 +657,7 @@ impl<S: BandSource> HealthClient<S> {
             self.store.put_raw_record(&crate::store::RawRecord {
                 metric: METRIC.to_owned(),
                 record_key,
-                observed_at_ms: None,
+                observed_at_ms: parse_date_ms(&record.date_time),
                 source_endpoint: crate::api::BAND_DATA_PATH.to_owned(),
                 source_device: record.device_id.clone(),
                 source_timezone: None,
@@ -676,7 +676,7 @@ impl<S: BandSource> HealthClient<S> {
     }
 
     fn read_band_data(&self, coverage: TimeRange) -> Result<Vec<DailyHealthRecord>, HealthError> {
-        let records = self
+        let records: Vec<DailyHealthRecord> = self
             .store
             .raw_records("band_data", coverage.from_ms, coverage.to_ms)?
             .into_iter()
@@ -684,13 +684,44 @@ impl<S: BandSource> HealthClient<S> {
                 let band: BandDataRecord = serde_json::from_value(record.payload)?;
                 decode_daily_health(&band)
             })
-            .collect::<Result<Vec<_>, HealthError>>()?;
+            .collect::<Result<Vec<_>, HealthError>>()?
+            .into_iter()
+            .filter(|record| {
+                parse_date_ms(&record.date).is_some_and(|timestamp| {
+                    timestamp >= coverage.from_ms && timestamp <= coverage.to_ms
+                })
+            })
+            .collect();
         let mut by_date = BTreeMap::new();
         for record in records {
             by_date.insert(record.date.clone(), record);
         }
         Ok(by_date.into_values().collect())
     }
+}
+
+fn parse_date_ms(date: &str) -> Option<i64> {
+    let bytes = date.as_bytes();
+    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+        return None;
+    }
+    let year = date[0..4].parse::<i64>().ok()?;
+    let month = date[5..7].parse::<i64>().ok()?;
+    let day = date[8..10].parse::<i64>().ok()?;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    let year_adj = year - i64::from(month <= 2);
+    let era = (if year_adj >= 0 {
+        year_adj
+    } else {
+        year_adj - 399
+    }) / 400;
+    let yoe = year_adj - era * 400;
+    let month_prime = month + if month > 2 { -3 } else { 9 };
+    let doy = (153 * month_prime + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some((era * 146097 + doe - 719468) * 86_400_000)
 }
 
 pub trait WeightSource: Send + Sync {
