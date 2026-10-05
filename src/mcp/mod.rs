@@ -217,6 +217,10 @@ where
                 )
                 .await
             }
+            "sleep_duration" | "sleep_awake" | "sleep_light" | "sleep_deep" | "sleep_rem" => {
+                self.summary_with_fallback(metric, forwarded.clone(), Value::Array(Vec::new()))
+                    .await
+            }
             "sport_load" | "vo2_max" => {
                 let statistic_metric = if metric == "sport_load" {
                     "SPORT_LOAD"
@@ -702,8 +706,8 @@ fn tools() -> Value {
             "cache_mode":{"type":"string","enum":["cache_only","cache_first","refresh"]},
             "now_ms":{"type":"integer"},"recent_refresh_ms":{"type":"integer"}
         }}},
-        {"name":"get_summary","description":"Get an authoritative provider summary first. Use this for resting_heart_rate, sleep_hrv, hrv_score, skin_temperature, sleep_score, daily_steps, daily_calories, daily_summary, sport_load, or vo2_max before requesting detailed time-series data.","inputSchema":{"type":"object","required":["metric","start_ms","end_ms"],"properties":{
-            "metric":{"type":"string"},"start_ms":{"type":"integer"},"end_ms":{"type":"integer"},
+        {"name":"get_summary","description":"Get an authoritative provider summary first. Use this before get_timeseries for named metrics including resting_heart_rate, sleep_hrv, sleep_duration, sleep_score, sleep_quality, sleep_awake, sleep_light, sleep_deep, sleep_rem, hrv_score, skin_temperature, daily_steps, daily_calories, daily_summary, sport_load, or vo2_max. Results may merge Zepp and Intervals.icu records to fill date gaps; inspect provenance and keep external values separate when comparing.","inputSchema":{"type":"object","required":["metric","start_ms","end_ms"],"properties":{
+            "metric":{"type":"string","description":"Named summary metric; prefer this tool for processed wellness values and sleep duration/components."},"start_ms":{"type":"integer"},"end_ms":{"type":"integer"},
             "from_date":{"type":"string"},"to_date":{"type":"string"},
             "cache_mode":{"type":"string","enum":["cache_only","cache_first","refresh"]},
             "now_ms":{"type":"integer"},"recent_refresh_ms":{"type":"integer"}

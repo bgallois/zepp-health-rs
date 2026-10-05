@@ -226,13 +226,15 @@ impl IntervalsHealthClient {
         if mode == CacheMode::CacheOnly {
             return Ok(Vec::new());
         }
-        let response = self
+        let mut request = self
             .http
             .get(format!("{API_ROOT}/athlete/0/wellness"))
             .basic_auth("API_KEY", Some(&self.token))
-            .query(&[("oldest", from_date.clone()), ("newest", to_date.clone())])
-            .send()
-            .await?;
+            .query(&[("oldest", from_date.clone()), ("newest", to_date.clone())]);
+        if let Some(field) = field {
+            request = request.query(&[("cols", field)]);
+        }
+        let response = request.send().await?;
         let response = response.error_for_status().map_err(|e| {
             e.status()
                 .map(IntervalsError::HttpStatus)
@@ -276,6 +278,10 @@ fn wellness_field(metric: &str) -> Option<&str> {
         "weight" => Some("weight"),
         "sleep_score" => Some("sleepScore"),
         "sleep_duration" | "sleep" => Some("sleepSecs"),
+        "sleep_awake" => Some("AwakeTime"),
+        "sleep_light" => Some("LightSleep"),
+        "sleep_deep" => Some("DeepSleep"),
+        "sleep_rem" => Some("REMSleep"),
         "avg_sleeping_hr" => Some("avgSleepingHR"),
         "sleep_quality" => Some("sleepQuality"),
         "soreness" => Some("soreness"),
@@ -527,5 +533,14 @@ mod tests {
         assert!(records[0].provenance.external);
         assert_eq!(records[0].fields.get("unknown"), Some(&json!(true)));
         assert!(records[0].timestamp_ms.is_none());
+    }
+
+    #[test]
+    fn maps_intervals_sleep_component_fields() {
+        assert_eq!(wellness_field("sleep_duration"), Some("sleepSecs"));
+        assert_eq!(wellness_field("sleep_awake"), Some("AwakeTime"));
+        assert_eq!(wellness_field("sleep_light"), Some("LightSleep"));
+        assert_eq!(wellness_field("sleep_deep"), Some("DeepSleep"));
+        assert_eq!(wellness_field("sleep_rem"), Some("REMSleep"));
     }
 }
