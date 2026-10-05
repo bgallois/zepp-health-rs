@@ -61,11 +61,12 @@ The client reads these environment variables:
 
 | Variable | Required | Meaning |
 | --- | --- | --- |
-| `ZEPP_TOKEN` | yes | Zepp `apptoken` header value |
+| `ZEPP_TOKEN` | required for Zepp data | Zepp `apptoken` header value |
 | `ZEPP_USER_ID` | recommended | Numeric Zepp account identifier |
 | `ZEPP_HOST` | recommended | Regional API host, for example `api-mifit-de2.zepp.com` |
 | `ZEPP_BASE_URL` | fallback | Full API origin if `ZEPP_HOST` is not set |
 | `ZEPP_DB_PATH` | no | SQLite path; defaults to `./zepp-health.sqlite3` for MCP |
+| `INTERVALS_TOKEN` | optional | Intervals.icu personal API key; enables external wellness/activity data |
 
 Do not put these values in source code, fixtures, shell history, issue reports,
 logs, MCP responses, or Git. Treat the token like a password and rotate it if
@@ -311,6 +312,13 @@ When enabled, set your Intervals.icu personal API key in the MCP process environ
 [mcp_servers.zepp-health.env]
 INTERVALS_TOKEN = "replace-with-your-intervals-api-key"
 ```
+
+If only `INTERVALS_TOKEN` is configured, the MCP still starts and summary queries
+use Intervals.icu directly without failing on the unconfigured Zepp provider.
+Zepp-specific event, band-detail, and time-series tools still require
+`ZEPP_TOKEN`. When both tokens are configured, Zepp is queried first and
+Intervals.icu fills only dates missing from Zepp; external records are marked
+with `provenance.external=true`.
 
 The key is sent as HTTP Basic authentication with username `API_KEY`; the
 athlete path uses Intervals.icu's `0` owner shortcut. Intervals.icu documents

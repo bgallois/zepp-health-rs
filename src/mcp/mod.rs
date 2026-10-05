@@ -5,6 +5,8 @@
 use serde_json::{Value, json};
 use thiserror::Error;
 
+#[cfg(feature = "intervals")]
+use crate::api::ApiError;
 use crate::health::{
     BandSource, CacheMode, DailyHealthRecord, EventRecord, EventSource, HealthClient, HealthError,
     HrvPoint, HrvSource, SportSource, SportStatisticRecord, TimeRange, WeightRecord, WeightSource,
@@ -194,7 +196,8 @@ where
             "resting_heart_rate" => {
                 object.insert("event_type".into(), Value::String("readiness".into()));
                 object.insert("sub_type".into(), Value::String("watch_score".into()));
-                let events = self.get_events(&forwarded).await?;
+                let events = self.zepp_summary_value(self.get_events(&forwarded).await)?;
+                let events: Vec<EventRecord> = serde_json::from_value(events)?;
                 let records = events
                     .into_iter()
                     .filter_map(|event| {
@@ -215,7 +218,7 @@ where
             "sleep_hrv" | "hrv_score" | "skin_temperature" => {
                 object.insert("event_type".into(), Value::String("readiness".into()));
                 object.insert("sub_type".into(), Value::String("watch_score".into()));
-                let events = serde_json::to_value(self.get_events(&forwarded).await?)?;
+                let events = self.zepp_summary_value(self.get_events(&forwarded).await)?;
                 self.summary_with_fallback(
                     metric,
                     forwarded.clone(),
@@ -224,7 +227,7 @@ where
                 .await
             }
             "sleep_score" | "daily_steps" | "daily_calories" | "daily_summary" => {
-                let band = serde_json::to_value(self.get_band_data(&forwarded).await?)?;
+                let band = self.zepp_summary_value(self.get_band_data(&forwarded).await)?;
                 self.summary_with_fallback(
                     metric,
                     forwarded.clone(),
@@ -241,9 +244,8 @@ where
                 .await
             }
             "sleep_duration" => {
-                let zepp_sleep = self
-                    .get_band_data(&forwarded)
-                    .await?
+                let band = self.zepp_summary_value(self.get_band_data(&forwarded).await)?;
+                let zepp_sleep = serde_json::from_value::<Vec<DailyHealthRecord>>(band)?
                     .into_iter()
                     .filter_map(|record| {
                         let sleep = record.sleep?;
@@ -275,7 +277,7 @@ where
                 self.summary_with_fallback(
                     metric,
                     forwarded.clone(),
-                    serde_json::to_value(self.get_sport_statistics(&forwarded).await?)?,
+                    self.zepp_summary_value(self.get_sport_statistics(&forwarded).await)?,
                 )
                 .await
             }
@@ -283,7 +285,7 @@ where
                 self.summary_with_fallback(
                     metric,
                     forwarded.clone(),
-                    serde_json::to_value(self.get_weight(&forwarded).await?)?,
+                    self.zepp_summary_value(self.get_weight(&forwarded).await)?,
                 )
                 .await
             }
@@ -325,6 +327,20 @@ where
             }
         }
         Ok(value)
+    }
+
+    fn zepp_summary_value<T: serde::Serialize>(
+        &self,
+        result: Result<T, McpError>,
+    ) -> Result<Value, McpError> {
+        match result {
+            Ok(value) => Ok(serde_json::to_value(value)?),
+            #[cfg(feature = "intervals")]
+            Err(McpError::Health(HealthError::Provider(ApiError::MissingToken))) => {
+                Ok(Value::Array(Vec::new()))
+            }
+            Err(error) => Err(error),
+        }
     }
 
     async fn get_events(&self, args: &Value) -> Result<Vec<EventRecord>, McpError> {
