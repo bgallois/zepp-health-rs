@@ -191,21 +191,44 @@ where
             McpError::InvalidRequest("get_summary arguments must be an object".into())
         })?;
         match metric {
-            "resting_heart_rate" | "sleep_hrv" | "hrv_score" | "skin_temperature" => {
+            "resting_heart_rate" => {
                 object.insert("event_type".into(), Value::String("readiness".into()));
                 object.insert("sub_type".into(), Value::String("watch_score".into()));
+                let events = self.get_events(&forwarded).await?;
+                let records = events
+                    .into_iter()
+                    .filter_map(|event| {
+                        let value = event.value.clone()?;
+                        let rhr = value.get("sleepRHR")?.clone();
+                        Some(json!({
+                            "metric": "resting_heart_rate",
+                            "timestamp_ms": event.timestamp_ms,
+                            "record_date": event.timestamp_ms.and_then(date_from_timestamp_ms_opt),
+                            "value": rhr,
+                            "fields": value,
+                        }))
+                    })
+                    .collect::<Vec<_>>();
+                self.summary_with_fallback(metric, forwarded.clone(), Value::Array(records))
+                    .await
+            }
+            "sleep_hrv" | "hrv_score" | "skin_temperature" => {
+                object.insert("event_type".into(), Value::String("readiness".into()));
+                object.insert("sub_type".into(), Value::String("watch_score".into()));
+                let events = serde_json::to_value(self.get_events(&forwarded).await?)?;
                 self.summary_with_fallback(
                     metric,
                     forwarded.clone(),
-                    serde_json::to_value(self.get_events(&forwarded).await?)?,
+                    normalize_summary_records(metric, events),
                 )
                 .await
             }
             "sleep_score" | "daily_steps" | "daily_calories" | "daily_summary" => {
+                let band = serde_json::to_value(self.get_band_data(&forwarded).await?)?;
                 self.summary_with_fallback(
                     metric,
                     forwarded.clone(),
-                    serde_json::to_value(self.get_band_data(&forwarded).await?)?,
+                    normalize_summary_records(metric, band),
                 )
                 .await
             }
@@ -217,7 +240,28 @@ where
                 )
                 .await
             }
-            "sleep_duration" | "sleep_awake" | "sleep_light" | "sleep_deep" | "sleep_rem" => {
+            "sleep_duration" => {
+                let zepp_sleep = self
+                    .get_band_data(&forwarded)
+                    .await?
+                    .into_iter()
+                    .filter_map(|record| {
+                        let sleep = record.sleep?;
+                        let duration = match (sleep.start_s, sleep.end_s) {
+                            (Some(start), Some(end)) if end >= start => end - start,
+                            _ => return None,
+                        };
+                        Some(json!({
+                            "metric": "sleep_duration",
+                            "record_date": record.date,
+                            "value": duration,
+                        }))
+                    })
+                    .collect::<Vec<_>>();
+                self.summary_with_fallback(metric, forwarded.clone(), Value::Array(zepp_sleep))
+                    .await
+            }
+            "sleep_awake" | "sleep_light" | "sleep_deep" | "sleep_rem" => {
                 self.summary_with_fallback(metric, forwarded.clone(), Value::Array(Vec::new()))
                     .await
             }
@@ -506,6 +550,43 @@ fn annotate_zepp_provenance(value: Value) -> Value {
     )
 }
 
+fn normalize_summary_records(metric: &str, value: Value) -> Value {
+    let Some(records) = value.as_array() else {
+        return value;
+    };
+    let field = match metric {
+        "sleep_hrv" => "sleepHRV",
+        "hrv_score" => "hrvScore",
+        "skin_temperature" => "skinTempCalibrated",
+        _ => "",
+    };
+    if !field.is_empty() {
+        return Value::Array(records.iter().filter_map(|record| {
+            let object = record.as_object()?;
+            let nested = object.get("value")?.as_object()?;
+            let value = nested.get(field)?.clone();
+            let timestamp_ms = object.get("timestamp_ms").cloned().unwrap_or(Value::Null);
+            Some(json!({"metric": metric, "timestamp_ms": timestamp_ms,
+                "record_date": object.get("timestamp_ms").and_then(Value::as_i64).map(date_from_timestamp_ms),
+                "value": value, "fields": nested}))
+        }).collect());
+    }
+    if matches!(metric, "sleep_score" | "daily_steps" | "daily_calories") {
+        return Value::Array(records.iter().filter_map(|record| {
+            let object = record.as_object()?;
+            let date = object.get("date")?.as_str()?;
+            let value = match metric {
+                "sleep_score" => object.get("sleep")?.get("score")?.clone(),
+                "daily_steps" => object.get("steps")?.clone(),
+                "daily_calories" => object.get("calories")?.clone(),
+                _ => return None,
+            };
+            Some(json!({"metric": metric, "record_date": date, "value": value, "fields": object}))
+        }).collect());
+    }
+    value
+}
+
 #[derive(Debug, serde::Serialize)]
 struct ExportResult {
     path: String,
@@ -655,6 +736,8 @@ fn json_record_date(value: &Value) -> Option<String> {
     if let Some(date) = object
         .get("date")
         .or_else(|| object.get("record_date"))
+        .or_else(|| object.get("fields").and_then(|fields| fields.get("date")))
+        .or_else(|| object.get("fields").and_then(|fields| fields.get("id")))
         .and_then(Value::as_str)
     {
         return Some(date.to_owned());
@@ -672,7 +755,6 @@ fn json_record_date(value: &Value) -> Option<String> {
     Some(date_from_timestamp_ms(timestamp))
 }
 
-#[cfg(feature = "intervals")]
 fn date_from_timestamp_ms(timestamp_ms: i64) -> String {
     let days = timestamp_ms.div_euclid(86_400_000);
     let z = days + 719_468;
@@ -686,6 +768,10 @@ fn date_from_timestamp_ms(timestamp_ms: i64) -> String {
     let month = mp + if mp < 10 { 3 } else { -9 };
     let year = year + i64::from(month <= 2);
     format!("{year:04}-{month:02}-{day:02}")
+}
+
+fn date_from_timestamp_ms_opt(timestamp_ms: i64) -> Option<String> {
+    Some(date_from_timestamp_ms(timestamp_ms))
 }
 
 #[allow(unused_mut)]

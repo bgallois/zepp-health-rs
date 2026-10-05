@@ -282,6 +282,8 @@ fn wellness_field(metric: &str) -> Option<&str> {
         "sleep_light" => Some("LightSleep"),
         "sleep_deep" => Some("DeepSleep"),
         "sleep_rem" => Some("REMSleep"),
+        "daily_steps" => Some("Steps"),
+        "daily_calories" => Some("ActiveEnergy"),
         "avg_sleeping_hr" => Some("avgSleepingHR"),
         "sleep_quality" => Some("sleepQuality"),
         "soreness" => Some("soreness"),
