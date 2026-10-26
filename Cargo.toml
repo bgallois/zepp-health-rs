@@ -11,8 +11,9 @@ keywords = ["zepp", "health", "amazfit", "api"]
 categories = ["api-bindings"]
 
 [features]
-default = ["intervals"]
+default = ["intervals", "garmin"]
 intervals = []
+garmin = []
 
 [dependencies]
 base64 = "0.22"

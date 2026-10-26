@@ -5,8 +5,10 @@
 use serde_json::{Value, json};
 use thiserror::Error;
 
-#[cfg(feature = "intervals")]
+#[cfg(any(feature = "intervals", feature = "garmin"))]
 use crate::api::ApiError;
+#[cfg(any(feature = "intervals", feature = "garmin"))]
+use crate::health::ExternalWellnessQuery;
 use crate::health::{
     BandSource, CacheMode, DailyHealthRecord, EventRecord, EventSource, HealthClient, HealthError,
     HrvPoint, HrvSource, SportSource, SportStatisticRecord, TimeRange, WeightRecord, WeightSource,
@@ -68,7 +70,7 @@ where
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {"listChanged": false}},
                 "serverInfo": {"name": "zepp-health-rs", "version": env!("CARGO_PKG_VERSION")},
-                "instructions": "Use get_summary first for named health metrics such as resting heart rate, sleep HRV, HRV score, sleep score, daily steps, daily calories, sport load, and VO2 max. Summary results may merge Zepp and Intervals.icu records to fill date gaps. Always inspect each record's provenance.provider and provenance.external fields and report provider coverage when relevant; provider=zepp is device data, provider=intervals with external=true is external wellness data. Treat external records as supplemental and potentially not directly comparable to Zepp values because they may come from another device, algorithm, timezone, or measurement context. Do not silently combine providers into a single average, trend, baseline, or causal conclusion; keep provider-specific statistics separate and clearly label any comparison as approximate. Use get_timeseries only when the user asks for detailed samples, a custom aggregation, or analysis that cannot be answered by a provider summary. Do not derive a named summary from raw samples when Zepp provides an authoritative processed value."
+                "instructions": "Use get_summary first for named health metrics such as resting heart rate, sleep HRV, HRV score, sleep score, daily steps, daily calories, sport load, and VO2 max. Summary results use provider priority Zepp, then Garmin Connect Personal API when compiled/configured, then Intervals.icu to fill dates missing from higher-priority providers. Pass provider=zepp, provider=garmin, or provider=intervals to force one source; omit it or use provider=auto for normal priority behavior. There is intentionally no separate Garmin tool: Garmin data is exposed through the same stable summary API and identified by provenance.provider=garmin and provenance.external=true. Always inspect provenance.provider and provenance.external and report provider coverage. Treat external records as supplemental and potentially not directly comparable to Zepp values because they may come from another device, algorithm, timezone, or measurement context. Do not silently combine providers into a single average, trend, baseline, or causal conclusion; keep provider-specific statistics separate and clearly label comparisons as approximate. Use get_timeseries only for detailed samples, custom aggregation, or analysis that cannot be answered by a provider summary. Do not derive a named summary from raw samples when Zepp provides an authoritative processed value."
             }),
             "notifications/initialized" => return Ok(None),
             "tools/list" => json!({"tools": tools()}),
@@ -123,10 +125,50 @@ where
         if metric == "hrv" || metric == "hrv_rmssd" {
             return Ok(serde_json::to_value(self.get_hrv(args).await?)?);
         }
-        if matches!(
-            metric,
-            "heart_rate_detail" | "activity" | "steps" | "calories"
-        ) {
+        if metric == "heart_rate_detail" {
+            let requested_provider = provider_filter(args)?;
+            #[cfg(any(feature = "intervals", feature = "garmin"))]
+            if let Some(provider) = requested_provider
+                && provider != "zepp"
+            {
+                let query = external_wellness_query(args)?;
+                return Ok(serde_json::to_value(
+                    self.health
+                        .external_wellness_for_query(Some(provider), "heart_rate_detail", query)
+                        .await?,
+                )?);
+            }
+            let band = self.get_band_data(args).await;
+            match band {
+                Ok(records) if !records.is_empty() => {
+                    return Ok(serde_json::to_value(records)?);
+                }
+                Ok(_) => {}
+                #[cfg(any(feature = "intervals", feature = "garmin"))]
+                Err(McpError::Health(HealthError::Provider(ApiError::MissingToken))) => {}
+                Err(error) => return Err(error),
+            }
+            if requested_provider == Some("zepp") {
+                return Ok(Value::Array(Vec::new()));
+            }
+            #[cfg(any(feature = "intervals", feature = "garmin"))]
+            {
+                let query = external_wellness_query(args)?;
+                return Ok(serde_json::to_value(
+                    self.health
+                        .external_wellness_query("heart_rate_detail", query)
+                        .await?,
+                )?);
+            }
+            #[cfg(not(any(feature = "intervals", feature = "garmin")))]
+            return Ok(serde_json::to_value(Vec::<DailyHealthRecord>::new())?);
+        }
+        if matches!(metric, "activity" | "steps" | "calories") {
+            if provider_filter(args)?.is_some_and(|provider| provider != "zepp") {
+                return Err(McpError::InvalidRequest(format!(
+                    "provider override is not supported for detailed '{metric}' band data; use provider=zepp or omit provider"
+                )));
+            }
             return Ok(serde_json::to_value(self.get_band_data(args).await?)?);
         }
         if metric == "sleep" {
@@ -151,6 +193,35 @@ where
         }
         if metric == "weight" {
             return Ok(serde_json::to_value(self.get_weight(args).await?)?);
+        }
+        #[cfg(any(feature = "intervals", feature = "garmin"))]
+        if metric == "stress" {
+            let provider = provider_filter(args)?;
+            if let Some(provider) = provider
+                && provider != "zepp"
+            {
+                let query = external_wellness_query(args)?;
+                return Ok(serde_json::to_value(
+                    self.health
+                        .external_wellness_for_query(Some(provider), metric, query)
+                        .await?,
+                )?);
+            }
+            let mut event_args = args.clone();
+            let object = event_args.as_object_mut().ok_or_else(|| {
+                McpError::InvalidRequest("get_timeseries arguments must be an object".into())
+            })?;
+            object.insert("event_type".into(), Value::String("all_day_stress".into()));
+            let zepp = self.zepp_summary_value(self.get_events(&event_args).await)?;
+            if provider == Some("zepp")
+                || zepp.as_array().is_some_and(|records| !records.is_empty())
+            {
+                return Ok(zepp);
+            }
+            let query = external_wellness_query(args)?;
+            return Ok(serde_json::to_value(
+                self.health.external_wellness_query("stress", query).await?,
+            )?);
         }
         #[cfg(feature = "intervals")]
         if metric == "activity_stream" {
@@ -192,6 +263,17 @@ where
         let object = forwarded.as_object_mut().ok_or_else(|| {
             McpError::InvalidRequest("get_summary arguments must be an object".into())
         })?;
+        #[cfg(any(feature = "intervals", feature = "garmin"))]
+        if let Some(provider) = provider_filter(args)?
+            && provider != "zepp"
+        {
+            let query = external_wellness_query(args)?;
+            return Ok(serde_json::to_value(
+                self.health
+                    .external_wellness_for_query(Some(provider), metric, query)
+                    .await?,
+            )?);
+        }
         match metric {
             "resting_heart_rate" => {
                 object.insert("event_type".into(), Value::String("readiness".into()));
@@ -263,6 +345,11 @@ where
                 self.summary_with_fallback(metric, forwarded.clone(), Value::Array(zepp_sleep))
                     .await
             }
+            "floors_ascended" | "floors_descended" | "body_battery" | "hydration"
+            | "daily_spo2" => {
+                self.summary_with_fallback(metric, forwarded.clone(), Value::Array(Vec::new()))
+                    .await
+            }
             "sleep_awake" | "sleep_light" | "sleep_deep" | "sleep_rem" => {
                 self.summary_with_fallback(metric, forwarded.clone(), Value::Array(Vec::new()))
                     .await
@@ -301,28 +388,32 @@ where
         args: Value,
         zepp: Value,
     ) -> Result<Value, McpError> {
-        #[cfg(not(feature = "intervals"))]
+        #[cfg(not(any(feature = "intervals", feature = "garmin")))]
         let _ = (metric, &args);
         let value = annotate_zepp_provenance(zepp);
-        #[cfg(feature = "intervals")]
+        #[cfg(any(feature = "intervals", feature = "garmin"))]
         {
-            let (range, mode, _, _) = query_args(&args)?;
-            let external = self.health.external_wellness(metric, range, mode).await?;
+            if provider_filter(&args)? == Some("zepp") {
+                return Ok(value);
+            }
+            let query = external_wellness_query(&args)?;
+            let external = self.health.external_wellness_query(metric, query).await?;
             if !external.is_empty() {
-                let covered: std::collections::HashSet<String> = value
+                let mut covered: std::collections::HashSet<String> = value
                     .as_array()
                     .into_iter()
                     .flatten()
                     .filter_map(json_record_date)
                     .collect();
                 let mut merged = value.as_array().cloned().unwrap_or_default();
-                merged.extend(
-                    external
-                        .into_iter()
-                        .filter(|record| !covered.contains(&record.record_date))
-                        .map(serde_json::to_value)
-                        .collect::<Result<Vec<_>, _>>()?,
-                );
+                for record in external {
+                    // Sources are attached in priority order (Zepp, Garmin,
+                    // then Intervals). Keep only the first external record for
+                    // a date so providers are never silently mixed.
+                    if covered.insert(record.record_date.clone()) {
+                        merged.push(serde_json::to_value(record)?);
+                    }
+                }
                 return Ok(Value::Array(merged));
             }
         }
@@ -335,7 +426,7 @@ where
     ) -> Result<Value, McpError> {
         match result {
             Ok(value) => Ok(serde_json::to_value(value)?),
-            #[cfg(feature = "intervals")]
+            #[cfg(any(feature = "intervals", feature = "garmin"))]
             Err(McpError::Health(HealthError::Provider(ApiError::MissingToken))) => {
                 Ok(Value::Array(Vec::new()))
             }
@@ -746,7 +837,23 @@ fn query_args(args: &Value) -> Result<(TimeRange, CacheMode, i64, Option<i64>), 
     Ok((TimeRange::new(from_ms, to_ms)?, mode, now_ms, refresh))
 }
 
-#[cfg(feature = "intervals")]
+#[cfg(any(feature = "intervals", feature = "garmin"))]
+fn external_wellness_query(args: &Value) -> Result<ExternalWellnessQuery, McpError> {
+    let (range, mode, _, _) = query_args(args)?;
+    let from_date = args.get("from_date").and_then(Value::as_str);
+    let to_date = args.get("to_date").and_then(Value::as_str);
+    match (from_date, to_date) {
+        (Some(from), Some(to)) => {
+            Ok(ExternalWellnessQuery::new(range, mode).with_dates(from.to_owned(), to.to_owned()))
+        }
+        (None, None) => Ok(ExternalWellnessQuery::new(range, mode)),
+        _ => Err(McpError::InvalidRequest(
+            "from_date and to_date must be provided together".into(),
+        )),
+    }
+}
+
+#[cfg(any(feature = "intervals", feature = "garmin"))]
 fn json_record_date(value: &Value) -> Option<String> {
     let object = value.as_object()?;
     if let Some(date) = object
@@ -800,17 +907,19 @@ fn tools() -> Value {
     event_properties.insert("sub_type".into(), json!({"type":"string"}));
     let mut tools = json!([
         {"name":"get_timeseries","description":"Get a health time series for a selected metric. Use metric=hrv, readiness, respiratory_rate, charge, spo2, exertion, daily_health, or stress.","inputSchema":{"type":"object","required":["metric","start_ms","end_ms"],"properties":{
-            "metric":{"type":"string","description":"hrv, resting_heart_rate, heart_rate_detail (intraday samples), sleep, activity, steps, calories, weight, readiness, respiratory_rate, charge, spo2, exertion, daily_health, stress, sport_load, vo2_max, or activity_stream (Intervals build)"},
+            "metric":{"type":"string","description":"hrv, resting_heart_rate, heart_rate_detail (intraday samples from Zepp or Garmin), sleep, activity, steps, calories, weight, readiness, respiratory_rate, charge, spo2, exertion, daily_health, stress, sport_load, vo2_max, or activity_stream (Intervals build)"},
             "start_ms":{"type":"integer"},"end_ms":{"type":"integer"},
             "activity_id":{"type":["string","integer"],"description":"Required for metric=activity_stream"},
             "stream_types":{"type":"array","items":{"type":"string"}},
             "from_date":{"type":"string","description":"Required for daily band or sport metrics (YYYY-MM-DD)"},"to_date":{"type":"string","description":"Required for daily band or sport metrics (YYYY-MM-DD)"},
+            "provider":{"type":"string","enum":["auto","zepp","garmin","intervals"],"description":"Optional source override for supported metrics. auto uses normal priority."},
             "cache_mode":{"type":"string","enum":["cache_only","cache_first","refresh"]},
             "now_ms":{"type":"integer"},"recent_refresh_ms":{"type":"integer"}
         }}},
-        {"name":"get_summary","description":"Get an authoritative provider summary first. Use this before get_timeseries for named metrics including resting_heart_rate, sleep_hrv, sleep_duration, sleep_score, sleep_quality, sleep_awake, sleep_light, sleep_deep, sleep_rem, hrv_score, skin_temperature, daily_steps, daily_calories, daily_summary, sport_load, or vo2_max. Results may merge Zepp and Intervals.icu records to fill date gaps; inspect provenance and keep external values separate when comparing.","inputSchema":{"type":"object","required":["metric","start_ms","end_ms"],"properties":{
-            "metric":{"type":"string","description":"Named summary metric; prefer this tool for processed wellness values and sleep duration/components."},"start_ms":{"type":"integer"},"end_ms":{"type":"integer"},
+        {"name":"get_summary","description":"Get an authoritative provider summary first. Use this before get_timeseries for named metrics including resting_heart_rate, sleep_hrv, sleep_duration, sleep_score, sleep_quality, sleep_awake, sleep_light, sleep_deep, sleep_rem, hrv_score, skin_temperature, daily_steps, daily_calories, floors_ascended, floors_descended, body_battery, hydration, daily_spo2, weight, daily_summary, sport_load, or vo2_max. Results use priority Zepp, Garmin Connect (when configured), then Intervals.icu to fill dates missing from higher-priority providers. Inspect provenance.provider and provenance.external; Garmin and Intervals records are external and must remain separate when comparing.","inputSchema":{"type":"object","required":["metric","start_ms","end_ms"],"properties":{
+            "metric":{"type":"string","description":"Named summary metric; prefer this tool for processed wellness values and sleep duration/components. Garmin additionally supports floors_ascended, floors_descended, body_battery, hydration, and daily_spo2."},"start_ms":{"type":"integer"},"end_ms":{"type":"integer"},
             "from_date":{"type":"string"},"to_date":{"type":"string"},
+            "provider":{"type":"string","enum":["auto","zepp","garmin","intervals"],"description":"Optional source override. auto uses normal priority."},
             "cache_mode":{"type":"string","enum":["cache_only","cache_first","refresh"]},
             "now_ms":{"type":"integer"},"recent_refresh_ms":{"type":"integer"}
         }}},
@@ -835,6 +944,7 @@ fn tools() -> Value {
             "start_ms":{"type":"integer"},"end_ms":{"type":"integer"},
             "from_date":{"type":"string"},"to_date":{"type":"string"},
             "filename":{"type":"string","description":"Optional filename; path components are removed and .csv is added"},
+            "provider":{"type":"string","enum":["auto","zepp","garmin","intervals"],"description":"Optional source override for supported metrics."},
             "cache_mode":{"type":"string","enum":["cache_only","cache_first","refresh"]},
             "now_ms":{"type":"integer"},"recent_refresh_ms":{"type":"integer"}
         }}}
@@ -852,6 +962,32 @@ fn query_properties() -> Value {
         "cache_mode":{"type":"string","enum":["cache_only","cache_first","refresh"]},
         "now_ms":{"type":"integer"}, "recent_refresh_ms":{"type":"integer"}
     })
+}
+
+fn provider_filter(args: &Value) -> Result<Option<&'static str>, McpError> {
+    match args.get("provider").and_then(Value::as_str) {
+        None | Some("auto") => Ok(None),
+        Some("zepp") => Ok(Some("zepp")),
+        Some("garmin") => {
+            #[cfg(feature = "garmin")]
+            return Ok(Some("garmin"));
+            #[cfg(not(feature = "garmin"))]
+            return Err(McpError::InvalidRequest(
+                "provider 'garmin' is not compiled into this binary".into(),
+            ));
+        }
+        Some("intervals") => {
+            #[cfg(feature = "intervals")]
+            return Ok(Some("intervals"));
+            #[cfg(not(feature = "intervals"))]
+            return Err(McpError::InvalidRequest(
+                "provider 'intervals' is not compiled into this binary".into(),
+            ));
+        }
+        Some(value) => Err(McpError::InvalidRequest(format!(
+            "unsupported provider '{value}'; use auto, zepp, garmin, or intervals"
+        ))),
+    }
 }
 
 fn error_response(id: Value, code: i64, message: &str) -> Value {
@@ -909,7 +1045,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{csv_rows, safe_csv_filename};
+    #[cfg(any(feature = "intervals", feature = "garmin"))]
+    use super::external_wellness_query;
+    use super::{csv_rows, provider_filter, safe_csv_filename};
     use serde_json::json;
 
     #[test]
@@ -935,5 +1073,32 @@ mod tests {
     #[test]
     fn export_filename_cannot_escape_export_directory() {
         assert_eq!(safe_csv_filename("../sleep").unwrap(), ".._sleep.csv");
+    }
+
+    #[test]
+    fn validates_provider_override() {
+        assert_eq!(provider_filter(&json!({})).unwrap(), None);
+        assert_eq!(provider_filter(&json!({"provider":"auto"})).unwrap(), None);
+        assert_eq!(
+            provider_filter(&json!({"provider":"zepp"})).unwrap(),
+            Some("zepp")
+        );
+        assert!(provider_filter(&json!({"provider":"unknown"})).is_err());
+    }
+
+    #[cfg(any(feature = "intervals", feature = "garmin"))]
+    #[test]
+    fn external_query_preserves_explicit_civil_dates() {
+        let query = external_wellness_query(&json!({
+            "start_ms": 1793142000000_i64,
+            "end_ms": 1793228399000_i64,
+            "from_date": "2026-10-28",
+            "to_date": "2026-10-28",
+            "cache_mode": "refresh"
+        }))
+        .expect("query");
+
+        assert_eq!(query.from_date.as_deref(), Some("2026-10-28"));
+        assert_eq!(query.to_date.as_deref(), Some("2026-10-28"));
     }
 }

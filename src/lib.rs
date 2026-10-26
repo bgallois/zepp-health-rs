@@ -4,6 +4,8 @@
 //! cloud API is unofficial; raw Zepp response types stay in the `api` module.
 
 pub mod api;
+#[cfg(feature = "garmin")]
+pub mod garmin;
 pub mod health;
 #[cfg(feature = "intervals")]
 pub mod intervals;

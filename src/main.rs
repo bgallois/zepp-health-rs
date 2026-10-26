@@ -18,8 +18,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             zepp_health_rs::intervals::IntervalsHealthClient::from_env(&path)?;
         #[cfg(feature = "intervals")]
         let intervals_for_mcp = zepp_health_rs::intervals::IntervalsHealthClient::from_env(&path)?;
+        #[cfg(feature = "garmin")]
+        let garmin_for_health = zepp_health_rs::garmin::GarminHealthClient::from_env(&path)?;
         let store = zepp_health_rs::store::Store::open(&path)?;
         let health = zepp_health_rs::health::HealthClient::new(store, source);
+        #[cfg(feature = "garmin")]
+        let health = match garmin_for_health {
+            Some(client) => health.with_external_wellness(std::rc::Rc::new(client)),
+            None => health,
+        };
         #[cfg(feature = "intervals")]
         let health = match intervals_for_health {
             Some(client) => health.with_external_wellness(std::rc::Rc::new(client)),

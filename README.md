@@ -41,6 +41,8 @@ the tested payload and path; it does not prove universal compatibility.
 - Cache policies: `CacheOnly`, `CacheFirst`, and `Refresh`.
 - Stable health representations for HRV, heart rate, sleep, activity,
   readiness, respiratory rate, event streams, and sport statistics.
+- Optional Garmin Personal API and Intervals.icu sources, stored separately
+  with explicit provider and external-data provenance.
 - A local stdio MCP server with a common `get_timeseries` interface plus raw
   event, band-data, sport-statistics, and summary tools.
 
@@ -67,6 +69,8 @@ The client reads these environment variables:
 | `ZEPP_BASE_URL` | fallback | Full API origin if `ZEPP_HOST` is not set |
 | `ZEPP_DB_PATH` | no | SQLite path; defaults to `./zepp-health.sqlite3` for MCP |
 | `INTERVALS_TOKEN` | optional | Intervals.icu personal API key; enables external wellness/activity data |
+| `GARMIN_API_KEY` | optional | Garmin Connect Personal API key; enables Garmin HRV, sleep, daily stress, and daily heart-rate data |
+| `GARMIN_API_BASE_URL` | no | Garmin Personal API origin override, intended for testing; defaults to `https://personal.connectapi.garmin.com` |
 
 Do not put these values in source code, fixtures, shell history, issue reports,
 logs, MCP responses, or Git. Treat the token like a password and rotate it if
@@ -166,17 +170,46 @@ The time-series and event tools accept:
   "start_ms": 1790812800000,
   "end_ms": 1790899200000,
   "cache_mode": "cache_first",
+  "provider": "auto",
   "recent_refresh_ms": 86400000
 }
 ```
 
 Daily band and sport metrics additionally require `from_date` and `to_date`.
+When these civil-date fields are supplied, external providers use them for
+date-keyed requests; they are not reconstructed from the UTC date of
+`start_ms`. The millisecond range is still used to filter detailed samples.
+Supply both date fields together.
 
 Agents should use `get_summary` first for named metrics. They should use
 `get_timeseries` only when detailed samples, custom aggregation, or a
 correlation analysis is required. For example, answer “what was my nocturnal
 RHR this week?” from `get_summary(metric="resting_heart_rate")`; use detailed
 heart rate only for questions about intraday patterns.
+
+For summary metrics and supported detailed metrics, provider priority is Zepp,
+then Garmin, then Intervals.icu for missing dates. To force a specific source,
+pass `provider` as `zepp`, `garmin`, or `intervals` (use `auto` or omit it for
+normal priority behavior). A forced external provider bypasses Zepp and returns
+only that provider's records, including their provenance fields. For example, use
+`get_timeseries(metric="stress", provider="garmin", ...)` to request Garmin's
+daily stress series even when Zepp stress data exists.
+
+Garmin-specific examples:
+
+```json
+{
+  "metric": "heart_rate_detail",
+  "provider": "garmin",
+  "start_ms": 1790899200000,
+  "end_ms": 1790985599000,
+  "cache_mode": "cache_first"
+}
+```
+
+This requests Garmin's daily heart-rate payloads even when Zepp detailed band
+records are available. Garmin's supported stress endpoint is a daily summary;
+it does not currently expose intranight stress samples through this connector.
 
 For named summary metrics, prefer the processed provider stream. For example,
 `metric="resting_heart_rate"` reads the nightly `sleepRHR` value from
@@ -346,6 +379,67 @@ deduplication is not silently inferred. Once a documented Zepp workout source
 is available, matching must be interval-based (with any start-time tolerance
 explicitly marked as a heuristic), and a single Intervals activity may relate to
 multiple Zepp fragments.
+
+### Garmin Connect Personal API (optional)
+
+The [Garmin Connect Personal API](https://developer.garmin.com/gc-developer-program/personal/personal-api/)
+is for an individual user's own data. Garmin's official
+[program overview](https://developer.garmin.com/gc-developer-program/overview/)
+lists pull-only Activity and Health JSON access, and the Personal API reference
+includes dedicated HRV, sleep, daily stress, and daily heart-rate resources.
+Create a Personal API key while signed in to Garmin Connect Web, copy it when
+shown (it is displayed only once), and keep it private. Before an uncached
+Garmin fetch, the MCP exchanges that key for an access token; no refresh token
+is stored.
+
+Set only the key in the MCP process environment:
+
+```bash
+export GARMIN_API_KEY='replace-with-your-garmin-personal-api-key'
+cargo run --release --features garmin -- mcp
+```
+
+When Garmin is compiled and configured, summary fallback order is Zepp first,
+Garmin second, and Intervals.icu third. A Garmin record is returned with
+`provenance.provider="garmin"` and `provenance.external=true`; an Intervals
+record is used only when Zepp and Garmin do not cover that date. External
+records remain separate from Zepp values and must not be silently averaged or
+treated as the same device/algorithm.
+
+Garmin daily heart-rate detail is available through
+`get_timeseries(metric="heart_rate_detail")` when Zepp has no detailed band
+records for the requested range. Garmin returns the complete daily payload and
+its native sample representation; the response is intentionally not converted
+to a guessed sampling interval.
+
+Garmin's provider-computed resting heart rate is available through
+`get_summary(metric="resting_heart_rate")`. In automatic mode it fills dates
+that have no Zepp nightly RHR; use `provider="garmin"` to request Garmin alone.
+The connector reads Garmin's daily `restingHeartRate` value and does not derive
+RHR by averaging intraday heart-rate samples.
+
+Garmin also supplements the stable summary API with documented daily values:
+
+- `daily_steps` from Garmin's dedicated step-statistics resource;
+- `daily_calories` as active calories (`calories.burnedActive`);
+- `floors_ascended` and `floors_descended`;
+- `body_battery` using the latest daily value;
+- `hydration` in millilitres;
+- `daily_spo2` using Garmin's latest daily pulse-ox value;
+- `weight`, with body-composition fields retained in `fields`;
+- `daily_summary`, retaining Garmin's complete V2 daily-summary object.
+
+These values remain marked as external Garmin records. Fields such as goals,
+distance, resting/total calories, Body Battery bounds, minimum SpO2, BMI and
+body composition remain available in each record's `fields` object even when
+the stable `value` selects one primary scalar.
+
+The Personal API endpoint names are documented by Garmin, but response fields
+can vary by account and firmware. Raw Garmin JSON is retained in the
+`garmin_wellness` SQLite table so decoding can be extended without losing data.
+If no Garmin key is configured, the feature is inert and the MCP still starts
+normally. Garmin support is compiled by default. To build without it while
+retaining Intervals support, use `--no-default-features --features intervals`.
 
 ## Static builds and GitHub releases
 

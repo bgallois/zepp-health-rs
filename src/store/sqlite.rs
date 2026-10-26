@@ -157,6 +157,70 @@ impl Store {
         Ok(())
     }
 
+    #[cfg(feature = "garmin")]
+    pub fn migrate_garmin(&self) -> Result<(), StoreError> {
+        self.connection.execute_batch(
+            "CREATE TABLE IF NOT EXISTS garmin_wellness (
+                metric TEXT NOT NULL,
+                record_date TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                fetched_at_ms INTEGER NOT NULL,
+                PRIMARY KEY(metric, record_date)
+            );
+            CREATE INDEX IF NOT EXISTS idx_garmin_wellness_date
+                ON garmin_wellness(record_date);",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(feature = "garmin")]
+    pub fn put_garmin_wellness(
+        &self,
+        metric: &str,
+        record_date: &str,
+        payload: &Value,
+        fetched_at_ms: i64,
+    ) -> Result<(), StoreError> {
+        self.migrate_garmin()?;
+        self.connection.execute(
+            "INSERT INTO garmin_wellness(metric,record_date,payload_json,fetched_at_ms)
+             VALUES (?1,?2,?3,?4)
+             ON CONFLICT(metric,record_date) DO UPDATE SET payload_json=excluded.payload_json,
+             fetched_at_ms=excluded.fetched_at_ms",
+            params![
+                metric,
+                record_date,
+                serde_json::to_string(payload)?,
+                fetched_at_ms
+            ],
+        )?;
+        Ok(())
+    }
+
+    #[cfg(feature = "garmin")]
+    pub fn garmin_wellness_payloads(
+        &self,
+        metric: &str,
+        from_date: &str,
+        to_date: &str,
+    ) -> Result<Vec<Value>, StoreError> {
+        self.migrate_garmin()?;
+        let mut stmt = self.connection.prepare(
+            "SELECT payload_json FROM garmin_wellness WHERE metric=?1 AND record_date>=?2 AND record_date<=?3 ORDER BY record_date",
+        )?;
+        let rows = stmt.query_map(params![metric, from_date, to_date], |row| {
+            let raw: String = row.get(0)?;
+            serde_json::from_str(&raw).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     #[cfg(feature = "intervals")]
     pub fn put_intervals_wellness(
         &self,

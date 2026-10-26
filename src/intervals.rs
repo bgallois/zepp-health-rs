@@ -14,8 +14,8 @@ use serde_json::{Map, Value};
 use thiserror::Error;
 
 use crate::health::{
-    CacheMode, DataProvenance, ExternalWellnessRecord, ExternalWellnessSource, HealthError,
-    TimeRange,
+    CacheMode, DataProvenance, ExternalWellnessQuery, ExternalWellnessRecord,
+    ExternalWellnessSource, HealthError, TimeRange,
 };
 use crate::store::{Store, StoreError};
 
@@ -212,8 +212,22 @@ impl IntervalsHealthClient {
         range: TimeRange,
         mode: CacheMode,
     ) -> Result<Vec<ExternalWellnessRecord>, IntervalsError> {
-        let from_date = date_from_ms(range.from_ms);
-        let to_date = date_from_ms(range.to_ms);
+        self.wellness_query(metric, ExternalWellnessQuery::new(range, mode))
+            .await
+    }
+
+    pub async fn wellness_query(
+        &self,
+        metric: &str,
+        query: ExternalWellnessQuery,
+    ) -> Result<Vec<ExternalWellnessRecord>, IntervalsError> {
+        let from_date = query
+            .from_date
+            .unwrap_or_else(|| date_from_ms(query.range.from_ms));
+        let to_date = query
+            .to_date
+            .unwrap_or_else(|| date_from_ms(query.range.to_ms));
+        let mode = query.mode;
         let field = wellness_field(metric);
         if mode != CacheMode::Refresh {
             let cached = self
@@ -253,18 +267,21 @@ impl IntervalsHealthClient {
 }
 
 impl ExternalWellnessSource for IntervalsHealthClient {
+    fn provider_name(&self) -> &'static str {
+        "intervals"
+    }
+
     fn fetch_wellness<'a>(
         &'a self,
         metric: &'a str,
-        range: TimeRange,
-        mode: CacheMode,
+        query: ExternalWellnessQuery,
     ) -> std::pin::Pin<
         Box<
             dyn std::future::Future<Output = Result<Vec<ExternalWellnessRecord>, HealthError>> + 'a,
         >,
     > {
         Box::pin(async move {
-            self.wellness(metric, range, mode)
+            self.wellness_query(metric, query)
                 .await
                 .map_err(|error| HealthError::External(error.to_string()))
         })

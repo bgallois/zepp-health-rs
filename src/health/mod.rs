@@ -130,12 +130,38 @@ pub struct ExternalWellnessRecord {
     pub provenance: DataProvenance,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalWellnessQuery {
+    pub range: TimeRange,
+    pub mode: CacheMode,
+    pub from_date: Option<String>,
+    pub to_date: Option<String>,
+}
+
+impl ExternalWellnessQuery {
+    pub fn new(range: TimeRange, mode: CacheMode) -> Self {
+        Self {
+            range,
+            mode,
+            from_date: None,
+            to_date: None,
+        }
+    }
+
+    pub fn with_dates(mut self, from_date: String, to_date: String) -> Self {
+        self.from_date = Some(from_date);
+        self.to_date = Some(to_date);
+        self
+    }
+}
+
 pub trait ExternalWellnessSource {
+    fn provider_name(&self) -> &'static str;
+
     fn fetch_wellness<'a>(
         &'a self,
         metric: &'a str,
-        range: TimeRange,
-        mode: CacheMode,
+        query: ExternalWellnessQuery,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<ExternalWellnessRecord>, HealthError>> + 'a>>;
 }
 
@@ -453,7 +479,7 @@ impl HrvSource for ZeppApiClient {
 pub struct HealthClient<S> {
     store: Store,
     source: S,
-    external_wellness: Option<Rc<dyn ExternalWellnessSource>>,
+    external_wellness: Vec<Rc<dyn ExternalWellnessSource>>,
 }
 
 impl<S: HrvSource> HealthClient<S> {
@@ -461,12 +487,12 @@ impl<S: HrvSource> HealthClient<S> {
         Self {
             store,
             source,
-            external_wellness: None,
+            external_wellness: Vec::new(),
         }
     }
 
     pub fn with_external_wellness(mut self, source: Rc<dyn ExternalWellnessSource>) -> Self {
-        self.external_wellness = Some(source);
+        self.external_wellness.push(source);
         self
     }
 
@@ -476,10 +502,43 @@ impl<S: HrvSource> HealthClient<S> {
         range: TimeRange,
         mode: CacheMode,
     ) -> Result<Vec<ExternalWellnessRecord>, HealthError> {
-        let Some(source) = &self.external_wellness else {
-            return Ok(Vec::new());
-        };
-        source.fetch_wellness(metric, range, mode).await
+        self.external_wellness_query(metric, ExternalWellnessQuery::new(range, mode))
+            .await
+    }
+
+    pub async fn external_wellness_query(
+        &self,
+        metric: &str,
+        query: ExternalWellnessQuery,
+    ) -> Result<Vec<ExternalWellnessRecord>, HealthError> {
+        self.external_wellness_for_query(None, metric, query).await
+    }
+
+    pub async fn external_wellness_for(
+        &self,
+        provider: Option<&str>,
+        metric: &str,
+        range: TimeRange,
+        mode: CacheMode,
+    ) -> Result<Vec<ExternalWellnessRecord>, HealthError> {
+        self.external_wellness_for_query(provider, metric, ExternalWellnessQuery::new(range, mode))
+            .await
+    }
+
+    pub async fn external_wellness_for_query(
+        &self,
+        provider: Option<&str>,
+        metric: &str,
+        query: ExternalWellnessQuery,
+    ) -> Result<Vec<ExternalWellnessRecord>, HealthError> {
+        let mut records = Vec::new();
+        for source in &self.external_wellness {
+            if provider.is_some_and(|requested| requested != source.provider_name()) {
+                continue;
+            }
+            records.extend(source.fetch_wellness(metric, query.clone()).await?);
+        }
+        Ok(records)
     }
 
     pub async fn hrv(
